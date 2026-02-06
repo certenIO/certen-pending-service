@@ -9,10 +9,12 @@ import { AppConfig } from '../config';
 import {
   CertenUserWithAdis,
   CertenAdi,
+  CertenKeyBook,
   PendingActionDocument,
   ComputedPendingState,
 } from '../types';
 import { logger, logFirestoreOp } from '../utils/logger';
+import { encodeUrlForDocId } from '../utils/url-normalizer';
 
 export class FirestoreClient {
   private readonly db: admin.firestore.Firestore;
@@ -207,14 +209,38 @@ export class FirestoreClient {
   /**
    * Update signing paths on the user document
    */
-  async updateUserSigningPaths(uid: string, signingPaths: string[]): Promise<void> {
+  async updateUserSigningPaths(
+    uid: string,
+    signingPaths: string[],
+    signingPathsByAdi: Record<string, string[]>
+  ): Promise<void> {
     const userRef = this.db.collection(this.config.usersCollection).doc(uid);
     await userRef.update({
       signingPaths,
+      signingPathsByAdi,
       signingPathsLastUpdated: admin.firestore.Timestamp.now(),
     });
 
     logFirestoreOp('write', 'users/signingPaths', 1);
+  }
+
+  /**
+   * Update key books on an ADI document
+   */
+  async updateAdiKeyBooks(uid: string, adiUrl: string, keyBooks: CertenKeyBook[]): Promise<void> {
+    const adiDocId = encodeUrlForDocId(adiUrl);
+    const adiRef = this.db
+      .collection(this.config.usersCollection)
+      .doc(uid)
+      .collection('adis')
+      .doc(adiDocId);
+
+    await adiRef.update({
+      keyBooks,
+      updatedAt: admin.firestore.Timestamp.now(),
+    });
+
+    logFirestoreOp('write', `adis/${adiUrl}`, 1);
   }
 
   /**

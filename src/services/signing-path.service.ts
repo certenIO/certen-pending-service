@@ -7,9 +7,14 @@
 
 import { AccumulateClient } from '../clients/accumulate.client';
 import { AppConfig } from '../config';
-import { CertenAdi, CertenKeyPage, SigningPath } from '../types';
+import { CertenAdi, CertenKeyBook, CertenKeyEntry, CertenKeyPage, SigningPath } from '../types';
 import { normalizeUrl } from '../utils/url-normalizer';
 import { logger } from '../utils/logger';
+
+export interface SigningPathDiscoveryResult {
+  paths: SigningPath[];
+  discoveredKeyBooks: CertenKeyBook[];
+}
 
 export class SigningPathService {
   private readonly accumulate: AccumulateClient;
@@ -30,7 +35,7 @@ export class SigningPathService {
    * 3. For each delegate entry, follow the delegation chain
    * 4. Return validated paths up to maxDepth
    */
-  async discoverSigningPaths(userAdi: CertenAdi): Promise<SigningPath[]> {
+  async discoverSigningPaths(userAdi: CertenAdi): Promise<SigningPathDiscoveryResult> {
     const paths: SigningPath[] = [];
     const visited = new Set<string>();
     const processedPages = new Set<string>();
@@ -68,33 +73,68 @@ export class SigningPathService {
       }
     }
 
-    // Query each key book for page count to find key pages not in Firestore
+    // Query each key book for page count — build discovered key books and find new pages
+    const discoveredKeyBooks: CertenKeyBook[] = [];
     for (const bookUrl of keyBookUrls) {
       const pageCount = await this.accumulate.queryKeyBookPageCount(bookUrl);
+      if (pageCount === 0) continue; // not a key book (data account, ADI, etc.)
+
+      const discoveredPages: CertenKeyPage[] = [];
       for (let i = 1; i <= pageCount; i++) {
         const pageUrl = normalizeUrl(`${bookUrl}/${i}`);
-        if (processedPages.has(pageUrl)) continue;
-        processedPages.add(pageUrl);
 
-        paths.push({
-          path: pageUrl,
-          hops: [pageUrl],
-          finalSigner: pageUrl,
-          discoveredAt: new Date(),
-        });
-
-        // Query key page from Accumulate for delegate entries
+        // Always query Accumulate for latest key page state
         const keyPageData = await this.accumulate.queryKeyPage(pageUrl);
-        if (keyPageData?.keys) {
-          const delegates = keyPageData.keys.filter(k => k.delegate).map(k => normalizeUrl(k.delegate!));
-          for (const delegateUrl of delegates) {
-            await this.followDelegationChain(pageUrl, delegateUrl, [pageUrl], visited, paths, 1);
+        if (keyPageData) {
+          discoveredPages.push(this.toFirestoreKeyPage(keyPageData));
+        }
+
+        // Only add as signing path if not already processed from Firestore loop
+        if (!processedPages.has(pageUrl)) {
+          processedPages.add(pageUrl);
+
+          paths.push({
+            path: pageUrl,
+            hops: [pageUrl],
+            finalSigner: pageUrl,
+            discoveredAt: new Date(),
+          });
+
+          if (keyPageData?.keys) {
+            const delegates = keyPageData.keys.filter(k => k.delegate).map(k => normalizeUrl(k.delegate!));
+            for (const delegateUrl of delegates) {
+              await this.followDelegationChain(pageUrl, delegateUrl, [pageUrl], visited, paths, 1);
+            }
           }
         }
       }
+
+      discoveredKeyBooks.push({ url: bookUrl, keyPages: discoveredPages });
     }
 
-    return paths;
+    return { paths, discoveredKeyBooks };
+  }
+
+  /**
+   * Convert AccumulateKeyPage to CertenKeyPage for Firestore storage.
+   * Avoids undefined values which Firestore rejects.
+   */
+  private toFirestoreKeyPage(akp: { url: string; version: number; threshold: number; creditBalance: number; keys: { publicKeyHash: string; keyType?: string; delegate?: string }[] }): CertenKeyPage {
+    const entries: CertenKeyEntry[] = akp.keys.map(k => {
+      const entry: CertenKeyEntry = { type: k.delegate ? 'delegate' : 'key' } as CertenKeyEntry;
+      if (k.publicKeyHash) entry.publicKeyHash = k.publicKeyHash;
+      if (k.keyType) entry.keyType = k.keyType;
+      if (k.delegate) entry.delegateUrl = k.delegate;
+      return entry;
+    });
+
+    return {
+      url: akp.url,
+      version: akp.version,
+      threshold: akp.threshold,
+      creditBalance: akp.creditBalance,
+      entries,
+    };
   }
 
   /**

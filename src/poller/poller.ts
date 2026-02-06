@@ -11,7 +11,7 @@ import { SigningPathService } from '../services/signing-path.service';
 import { PendingDiscoveryService } from '../services/pending-discovery.service';
 import { StateManagerService } from '../services/state-manager.service';
 import { AppConfig } from '../config';
-import { CertenUserWithAdis, SigningPath, PollStats, createPollStats } from '../types';
+import { CertenUserWithAdis, CertenKeyBook, SigningPath, PollStats, createPollStats } from '../types';
 import { Semaphore } from '../utils/retry';
 import {
   logger,
@@ -147,9 +147,19 @@ export class PendingActionsPoller {
       const allPaths: SigningPath[] = [];
       const pathsByAdi: Record<string, string[]> = {};
       for (const adi of user.adis) {
-        const paths = await this.signingPathService.discoverSigningPaths(adi);
-        allPaths.push(...paths);
-        pathsByAdi[adi.adiUrl] = paths.map(p => p.path);
+        const result = await this.signingPathService.discoverSigningPaths(adi);
+        allPaths.push(...result.paths);
+        pathsByAdi[adi.adiUrl] = result.paths.map(p => p.path);
+
+        // Sync ADI key books if changes detected on network
+        if (this.keyBooksChanged(adi.keyBooks, result.discoveredKeyBooks)) {
+          logger.info(`[${user.uid.substring(0, 8)}] Key books changed for ${adi.adiUrl}`, {
+            firestoreBooks: (adi.keyBooks || []).length,
+            discoveredBooks: result.discoveredKeyBooks.length,
+          });
+          await this.firestore.updateAdiKeyBooks(user.uid, adi.adiUrl, result.discoveredKeyBooks);
+          stats.firestoreWrites++;
+        }
       }
 
       logger.info(`[${user.uid.substring(0, 8)}] Signing paths discovered`, {
@@ -160,7 +170,7 @@ export class PendingActionsPoller {
 
       // Update user doc with all discovered signing paths
       const allPathStrings = allPaths.map(p => p.path);
-      await this.firestore.updateUserSigningPaths(user.uid, allPathStrings);
+      await this.firestore.updateUserSigningPaths(user.uid, allPathStrings, pathsByAdi);
 
       // Discover pending transactions
       const discovery = await this.discoveryService.discoverPendingForUser(
@@ -240,6 +250,40 @@ export class PendingActionsPoller {
 
     process.on('SIGINT', () => handleShutdown('SIGINT'));
     process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+  }
+
+  /**
+   * Compare Firestore key books with network-discovered key books.
+   * Returns true if any difference is detected.
+   */
+  private keyBooksChanged(
+    firestoreBooks: CertenKeyBook[] | undefined,
+    discoveredBooks: CertenKeyBook[]
+  ): boolean {
+    const fsBooks = firestoreBooks || [];
+    if (fsBooks.length !== discoveredBooks.length) return true;
+
+    const fsMap = new Map(fsBooks.map(b => [b.url, b]));
+
+    for (const db of discoveredBooks) {
+      const fb = fsMap.get(db.url);
+      if (!fb) return true;
+
+      const fsPages = fb.keyPages || [];
+      const dbPages = db.keyPages || [];
+      if (fsPages.length !== dbPages.length) return true;
+
+      const fpMap = new Map(fsPages.map(p => [p.url, p]));
+      for (const dp of dbPages) {
+        const fp = fpMap.get(dp.url);
+        if (!fp) return true;
+        if (fp.version !== dp.version) return true;
+        if (fp.threshold !== dp.threshold) return true;
+        if ((fp.entries?.length || 0) !== (dp.entries?.length || 0)) return true;
+      }
+    }
+
+    return false;
   }
 
   /**
