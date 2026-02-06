@@ -181,19 +181,33 @@ export class AccumulateClient {
         },
       });
 
-      logger.info('Directory query raw response', {
-        adiUrl,
-        keys: Object.keys(response),
-        type: response.type,
-        total: response.total,
-        hasEntries: !!response.entries,
-        hasRecords: !!response.records,
-        hasItems: !!response.items,
-      });
+      // v3 API returns { records: [ { value: "acc://...", ... }, ... ] }
+      const records = (response.records || response.entries || response.items) as unknown[] | undefined;
 
-      // Try known response shapes: entries (v2), records (v3), items
-      const entries = (response.entries || response.records || response.items) as unknown[] | undefined;
-      return entries?.map((entry) => normalizeUrl(String(entry))) || [];
+      if (records && records.length > 0) {
+        logger.info('Directory query record sample', {
+          adiUrl,
+          total: response.total,
+          firstRecord: JSON.stringify(records[0]),
+        });
+      }
+
+      if (!records) return [];
+
+      return records
+        .map((record) => {
+          if (typeof record === 'string') return normalizeUrl(record);
+          const rec = record as Record<string, unknown>;
+          // v3 records: try value, account.url, url
+          const url = rec.value || rec.url || (rec.account as Record<string, unknown>)?.url;
+          if (typeof url === 'string') return normalizeUrl(url);
+          logger.warn('Could not extract URL from directory record', {
+            adiUrl,
+            record: JSON.stringify(rec),
+          });
+          return null;
+        })
+        .filter((url): url is string => url !== null);
     } catch (error) {
       logger.warn('Failed to query directory', {
         adiUrl,
