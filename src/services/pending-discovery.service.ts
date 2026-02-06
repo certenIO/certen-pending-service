@@ -276,19 +276,8 @@ export class PendingDiscoveryService {
       count: 100,
     });
 
-    if (directory.length > 0) {
-      logger.info('Directory query returned entries', {
-        adiUrl: adi.adiUrl,
-        directoryCount: directory.length,
-        entries: directory,
-      });
-      for (const entry of directory) {
-        addAccount(entry);
-      }
-    } else {
-      logger.warn('Directory query returned empty for ADI', {
-        adiUrl: adi.adiUrl,
-      });
+    for (const entry of directory) {
+      addAccount(entry);
     }
 
     // For each key book, query Accumulate for page count and enumerate key pages
@@ -304,14 +293,8 @@ export class PendingDiscoveryService {
 
     for (const bookUrl of keyBookUrls) {
       const pageCount = await this.accumulate.queryKeyBookPageCount(bookUrl);
-      if (pageCount > 0) {
-        logger.info('Key book page count', {
-          keyBookUrl: bookUrl,
-          pageCount,
-        });
-        for (let i = 1; i <= pageCount; i++) {
-          addAccount(`${bookUrl}/${i}`);
-        }
+      for (let i = 1; i <= pageCount; i++) {
+        addAccount(`${bookUrl}/${i}`);
       }
     }
 

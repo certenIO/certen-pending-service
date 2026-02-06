@@ -89,22 +89,8 @@ export class AccumulateClient {
         scope: normalizeUrl(keyBookUrl),
       });
 
-      // v3 AccountRecord: account field contains the data
       const account = response.account as Record<string, unknown> | undefined;
-      // Some responses nest under "data" instead
       const data = response.data as Record<string, unknown> | undefined;
-
-      logger.info('Key book query response', {
-        keyBookUrl,
-        keys: Object.keys(response),
-        recordType: response.recordType,
-        type: response.type,
-        accountType: account?.type,
-        accountPageCount: account?.pageCount,
-        dataType: data?.type,
-        dataPageCount: data?.pageCount,
-        topPageCount: response.pageCount,
-      });
 
       // v3: response.account.pageCount
       if (account?.type === 'keyBook' && typeof account.pageCount === 'number') {
@@ -232,17 +218,7 @@ export class AccumulateClient {
         },
       });
 
-      // v3 API returns { records: [ { value: "acc://...", ... }, ... ] }
       const records = (response.records || response.entries || response.items) as unknown[] | undefined;
-
-      if (records && records.length > 0) {
-        logger.info('Directory query record sample', {
-          adiUrl,
-          total: response.total,
-          firstRecord: JSON.stringify(records[0]),
-        });
-      }
-
       if (!records) return [];
 
       return records

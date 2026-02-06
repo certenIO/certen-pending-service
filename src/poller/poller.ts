@@ -145,15 +145,17 @@ export class PendingActionsPoller {
 
       // Discover signing paths for all user's ADIs
       const allPaths: SigningPath[] = [];
+      const pathsByAdi: Record<string, string[]> = {};
       for (const adi of user.adis) {
         const paths = await this.signingPathService.discoverSigningPaths(adi);
         allPaths.push(...paths);
+        pathsByAdi[adi.adiUrl] = paths.map(p => p.path);
       }
 
       logger.info(`[${user.uid.substring(0, 8)}] Signing paths discovered`, {
         adiCount: user.adis.length,
-        pathCount: allPaths.length,
-        paths: allPaths.map(p => p.path),
+        totalPaths: allPaths.length,
+        byAdi: pathsByAdi,
       });
 
       // Discover pending transactions

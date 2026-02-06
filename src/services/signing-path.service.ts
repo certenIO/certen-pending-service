@@ -33,39 +33,66 @@ export class SigningPathService {
   async discoverSigningPaths(userAdi: CertenAdi): Promise<SigningPath[]> {
     const paths: SigningPath[] = [];
     const visited = new Set<string>();
+    const processedPages = new Set<string>();
 
-    // Process each key book in user's ADI
+    // Collect all key book URLs from Firestore
+    const keyBookUrls = new Set<string>();
+    for (const keyBook of userAdi.keyBooks || []) {
+      keyBookUrls.add(normalizeUrl(keyBook.url));
+    }
+
+    // Discover additional key books from ADI directory
+    const directory = await this.accumulate.queryDirectory(userAdi.adiUrl, { count: 100 });
+    for (const entry of directory) {
+      keyBookUrls.add(normalizeUrl(entry));
+    }
+
+    // Process Firestore key pages first (already have delegate entries)
     for (const keyBook of userAdi.keyBooks || []) {
       for (const keyPage of keyBook.keyPages || []) {
-        // Add the direct key page as a path (single hop)
+        const pageUrl = normalizeUrl(keyPage.url);
+        if (processedPages.has(pageUrl)) continue;
+        processedPages.add(pageUrl);
+
         paths.push({
-          path: keyPage.url,
-          hops: [normalizeUrl(keyPage.url)],
-          finalSigner: normalizeUrl(keyPage.url),
+          path: pageUrl,
+          hops: [pageUrl],
+          finalSigner: pageUrl,
           discoveredAt: new Date(),
         });
 
-        // Find delegate entries and follow them
         const delegates = this.extractDelegates(keyPage);
-
         for (const delegateUrl of delegates) {
-          await this.followDelegationChain(
-            normalizeUrl(keyPage.url),
-            delegateUrl,
-            [normalizeUrl(keyPage.url)],
-            visited,
-            paths,
-            1
-          );
+          await this.followDelegationChain(pageUrl, delegateUrl, [pageUrl], visited, paths, 1);
         }
       }
     }
 
-    logger.info('Discovered signing paths for ADI', {
-      adiUrl: userAdi.adiUrl,
-      pathCount: paths.length,
-      paths: paths.map(p => p.path),
-    });
+    // Query each key book for page count to find key pages not in Firestore
+    for (const bookUrl of keyBookUrls) {
+      const pageCount = await this.accumulate.queryKeyBookPageCount(bookUrl);
+      for (let i = 1; i <= pageCount; i++) {
+        const pageUrl = normalizeUrl(`${bookUrl}/${i}`);
+        if (processedPages.has(pageUrl)) continue;
+        processedPages.add(pageUrl);
+
+        paths.push({
+          path: pageUrl,
+          hops: [pageUrl],
+          finalSigner: pageUrl,
+          discoveredAt: new Date(),
+        });
+
+        // Query key page from Accumulate for delegate entries
+        const keyPageData = await this.accumulate.queryKeyPage(pageUrl);
+        if (keyPageData?.keys) {
+          const delegates = keyPageData.keys.filter(k => k.delegate).map(k => normalizeUrl(k.delegate!));
+          for (const delegateUrl of delegates) {
+            await this.followDelegationChain(pageUrl, delegateUrl, [pageUrl], visited, paths, 1);
+          }
+        }
+      }
+    }
 
     return paths;
   }
@@ -116,13 +143,6 @@ export class SigningPathService {
     // Build new path
     const newPath = [...currentPath, normalizedTarget];
     const pathString = newPath.join(' -> ');
-
-    logger.info('Found delegation path', {
-      source: sourceUrl,
-      target: normalizedTarget,
-      path: pathString,
-      depth,
-    });
 
     results.push({
       path: pathString,
