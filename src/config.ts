@@ -63,7 +63,7 @@ function validateConfig(): AppConfig {
     accumulateApiUrl: process.env.ACCUMULATE_API_URL || 'https://mainnet.accumulatenetwork.io/v3',
     accumulateNetwork: accumulateNetwork as 'mainnet' | 'testnet' | 'devnet',
 
-    pollIntervalSec: parseInt(process.env.POLL_INTERVAL_SEC || '45', 10),
+    pollIntervalSec: parseInt(process.env.POLL_INTERVAL_SEC || '600', 10),
     userConcurrency: parseInt(process.env.USER_CONCURRENCY || '8', 10),
     maxRetries: parseInt(process.env.MAX_RETRIES || '3', 10),
 
