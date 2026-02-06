@@ -81,10 +81,22 @@ export class PendingDiscoveryService {
       allSignatures
     );
 
+    // Build signing paths grouped by ADI for Phase 2 and 3
+    const pathsByAdi = new Map<string, string[]>();
+    for (const sp of signingPaths) {
+      // The first hop is always the key page under this ADI
+      const adiUrl = extractAdiFromUrl(sp.hops[0]);
+      if (!pathsByAdi.has(adiUrl)) {
+        pathsByAdi.set(adiUrl, []);
+      }
+      pathsByAdi.get(adiUrl)!.push(sp.path);
+    }
+
     // PHASE 2: Process user accounts
     await this.processUserAccounts(
       user,
       userKeyHashes,
+      pathsByAdi,
       eligibleTxs,
       allSignatures
     );
@@ -94,6 +106,7 @@ export class PendingDiscoveryService {
     await this.scanSignatureChains(
       user,
       userKeyHashes,
+      pathsByAdi,
       seenHashes,
       eligibleTxs,
       allSignatures
@@ -182,10 +195,14 @@ export class PendingDiscoveryService {
   private async processUserAccounts(
     user: CertenUserWithAdis,
     userKeyHashes: Set<string>,
+    pathsByAdi: Map<string, string[]>,
     eligibleTxs: Map<string, EligibleTransaction>,
     allSignatures: Map<string, AccumulateSignature[]>
   ): Promise<void> {
     for (const adi of user.adis) {
+      const adiUrl = normalizeUrl(adi.adiUrl);
+      const adiSigningPaths = pathsByAdi.get(adiUrl) || [];
+
       // Discover all accounts under ADI
       const accounts = await this.discoverAdiAccounts(adi);
 
@@ -214,9 +231,15 @@ export class PendingDiscoveryService {
             const userHasSigned = this.hasUserSigned(tx.signatures, userKeyHashes);
 
             if (!userHasSigned) {
-              // User hasn't signed - determine category
               const category = this.determineCategory(tx, adi.adiUrl);
-              this.addEligibleTx(eligibleTxs, tx, adi.adiUrl, category);
+              // Record all signing paths for this ADI
+              for (const path of adiSigningPaths) {
+                this.addEligibleTx(eligibleTxs, tx, path, category);
+              }
+              // Fallback if no signing paths discovered
+              if (adiSigningPaths.length === 0) {
+                this.addEligibleTx(eligibleTxs, tx, adiUrl, category);
+              }
             }
           }
         } catch (error) {
@@ -236,6 +259,7 @@ export class PendingDiscoveryService {
   private async scanSignatureChains(
     user: CertenUserWithAdis,
     userKeyHashes: Set<string>,
+    pathsByAdi: Map<string, string[]>,
     seenHashes: Set<string>,
     eligibleTxs: Map<string, EligibleTransaction>,
     allSignatures: Map<string, AccumulateSignature[]>
@@ -314,7 +338,11 @@ export class PendingDiscoveryService {
               // Check if user has already signed
               const userHasSigned = this.hasUserSigned(txDetails.signatures, userKeyHashes);
               if (!userHasSigned) {
-                this.addEligibleTx(eligibleTxs, txDetails, bookUrl, 'requiring_signature');
+                const adiUrl = extractAdiFromUrl(bookUrl);
+                const adiPaths = pathsByAdi.get(adiUrl) || [bookUrl];
+                for (const path of adiPaths) {
+                  this.addEligibleTx(eligibleTxs, txDetails, path, 'requiring_signature');
+                }
 
                 if (!allSignatures.has(txHash)) {
                   allSignatures.set(txHash, txDetails.signatures);
