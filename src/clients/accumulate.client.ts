@@ -89,24 +89,35 @@ export class AccumulateClient {
         scope: normalizeUrl(keyBookUrl),
       });
 
+      // v3 AccountRecord: account field contains the data
+      const account = response.account as Record<string, unknown> | undefined;
+      // Some responses nest under "data" instead
       const data = response.data as Record<string, unknown> | undefined;
 
-      logger.info('Key book query raw response', {
+      logger.info('Key book query response', {
         keyBookUrl,
-        topLevelKeys: Object.keys(response),
-        topLevelType: response.type,
-        hasData: !!data,
-        dataKeys: data ? Object.keys(data) : [],
+        keys: Object.keys(response),
+        recordType: response.recordType,
+        type: response.type,
+        accountType: account?.type,
+        accountPageCount: account?.pageCount,
         dataType: data?.type,
         dataPageCount: data?.pageCount,
+        topPageCount: response.pageCount,
       });
 
+      // v3: response.account.pageCount
+      if (account?.type === 'keyBook' && typeof account.pageCount === 'number') {
+        return account.pageCount;
+      }
+
+      // Alt: response.data.pageCount
       if (data?.type === 'keyBook' && typeof data.pageCount === 'number') {
         return data.pageCount;
       }
 
-      // Fallback: check top-level
-      if (response.type === 'keyBook' && typeof response.pageCount === 'number') {
+      // Fallback: top-level
+      if (typeof response.pageCount === 'number') {
         return response.pageCount as number;
       }
 
