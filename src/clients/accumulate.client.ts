@@ -173,7 +173,7 @@ export class AccumulateClient {
     const { start = 0, count = 100 } = options;
 
     try {
-      const response = await this.call<DirectoryQueryResponse>('query', {
+      const response = await this.call<Record<string, unknown>>('query', {
         scope: normalizeUrl(adiUrl),
         query: {
           queryType: 'directory',
@@ -181,7 +181,19 @@ export class AccumulateClient {
         },
       });
 
-      return response.entries?.map((entry) => normalizeUrl(String(entry))) || [];
+      logger.info('Directory query raw response', {
+        adiUrl,
+        keys: Object.keys(response),
+        type: response.type,
+        total: response.total,
+        hasEntries: !!response.entries,
+        hasRecords: !!response.records,
+        hasItems: !!response.items,
+      });
+
+      // Try known response shapes: entries (v2), records (v3), items
+      const entries = (response.entries || response.records || response.items) as unknown[] | undefined;
+      return entries?.map((entry) => normalizeUrl(String(entry))) || [];
     } catch (error) {
       logger.warn('Failed to query directory', {
         adiUrl,
