@@ -301,7 +301,7 @@ export class AccumulateClient {
   async queryTransaction(txHashOrId: string): Promise<AccumulatePendingTx | null> {
     try {
       const response = await this.call<Record<string, unknown>>('query', {
-        txid: txHashOrId,
+        scope: txHashOrId,
       });
 
       return this.parseTransactionResponse(response, txHashOrId);
@@ -320,7 +320,7 @@ export class AccumulateClient {
   async queryTransactionRaw(txHashOrId: string): Promise<Record<string, unknown> | null> {
     try {
       return await this.call<Record<string, unknown>>('query', {
-        txid: txHashOrId,
+        scope: txHashOrId,
       });
     } catch {
       return null;
