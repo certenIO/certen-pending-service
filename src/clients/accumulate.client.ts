@@ -90,6 +90,17 @@ export class AccumulateClient {
       });
 
       const data = response.data as Record<string, unknown> | undefined;
+
+      logger.info('Key book query raw response', {
+        keyBookUrl,
+        topLevelKeys: Object.keys(response),
+        topLevelType: response.type,
+        hasData: !!data,
+        dataKeys: data ? Object.keys(data) : [],
+        dataType: data?.type,
+        dataPageCount: data?.pageCount,
+      });
+
       if (data?.type === 'keyBook' && typeof data.pageCount === 'number') {
         return data.pageCount;
       }
