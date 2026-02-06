@@ -158,6 +158,10 @@ export class PendingActionsPoller {
         byAdi: pathsByAdi,
       });
 
+      // Update user doc with all discovered signing paths
+      const allPathStrings = allPaths.map(p => p.path);
+      await this.firestore.updateUserSigningPaths(user.uid, allPathStrings);
+
       // Discover pending transactions
       const discovery = await this.discoveryService.discoverPendingForUser(
         user,

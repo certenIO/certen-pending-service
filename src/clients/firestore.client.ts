@@ -205,6 +205,19 @@ export class FirestoreClient {
   }
 
   /**
+   * Update signing paths on the user document
+   */
+  async updateUserSigningPaths(uid: string, signingPaths: string[]): Promise<void> {
+    const userRef = this.db.collection(this.config.usersCollection).doc(uid);
+    await userRef.update({
+      signingPaths,
+      signingPathsLastUpdated: admin.firestore.Timestamp.now(),
+    });
+
+    logFirestoreOp('write', 'users/signingPaths', 1);
+  }
+
+  /**
    * Get Firestore server timestamp
    */
   getServerTimestamp(): admin.firestore.FieldValue {
