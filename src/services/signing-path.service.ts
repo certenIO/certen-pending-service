@@ -61,9 +61,10 @@ export class SigningPathService {
       }
     }
 
-    logger.debug('Discovered signing paths', {
+    logger.info('Discovered signing paths for ADI', {
       adiUrl: userAdi.adiUrl,
       pathCount: paths.length,
+      paths: paths.map(p => p.path),
     });
 
     return paths;
@@ -115,6 +116,13 @@ export class SigningPathService {
     // Build new path
     const newPath = [...currentPath, normalizedTarget];
     const pathString = newPath.join(' -> ');
+
+    logger.info('Found delegation path', {
+      source: sourceUrl,
+      target: normalizedTarget,
+      path: pathString,
+      depth,
+    });
 
     results.push({
       path: pathString,

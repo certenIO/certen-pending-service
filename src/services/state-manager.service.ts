@@ -14,11 +14,9 @@ import {
   ComputedPendingState,
   UpdateResult,
   AccumulateSignature,
-  AccumulatePendingTx,
   SignatureRecord,
 } from '../types';
 import { normalizeHash } from '../utils/hash-normalizer';
-import { extractAdiFromUrl } from '../utils/url-normalizer';
 import { logger } from '../utils/logger';
 import { Timestamp } from 'firebase-admin/firestore';
 
@@ -136,42 +134,18 @@ export class StateManagerService {
     const expiresAt = tx.expiresAt
       ? this.firestore.createTimestamp(tx.expiresAt)
       : undefined;
-    const timeRemaining = expiresAt
-      ? expiresAt.toMillis() - now.toMillis()
-      : Number.MAX_SAFE_INTEGER;
-
-    // Parse transaction body for details
-    const txBody = tx.data || {};
-    const recipient = (txBody as Record<string, unknown>).recipient as string | undefined;
-    const amount = (txBody as Record<string, unknown>).amount as string | undefined;
-    const token = (txBody as Record<string, unknown>).token as string | undefined;
-
-    // Extract chain info from transaction type/data
-    const chainInfo = this.extractChainInfo(tx);
-
-    // Calculate required signatures from transaction data
-    const requiredSignatures = this.extractRequiredSignatures(tx);
 
     return {
       id: normalizeHash(tx.hash),
       category: eligible.category,
       type: 'transaction',
-      status: this.determineStatus(signatures.length, requiredSignatures),
+      status: signatures.length > 0 ? 'partially_signed' : 'pending',
 
       txHash: tx.hash,
       txId: tx.txId,
       principal: tx.principal,
       transactionType: tx.type,
 
-      // Cross-chain details
-      fromChain: chainInfo.fromChain,
-      toChain: chainInfo.toChain,
-      fromAddress: tx.principal,
-      toAddress: recipient,
-      amount,
-      tokenSymbol: token ? this.extractTokenSymbol(token) : undefined,
-
-      requiredSignatures,
       collectedSignatures: signatures.length,
       signatures: signatures.map(s => this.convertSignature(s, now)),
 
@@ -182,10 +156,6 @@ export class StateManagerService {
       updatedAt: now,
       expiresAt,
       discoveredAt: now,
-
-      urgencyLevel: this.calculateUrgency(timeRemaining),
-      isExpiring: timeRemaining < 24 * 60 * 60 * 1000,
-      timeRemaining,
     };
   }
 
@@ -204,78 +174,6 @@ export class StateManagerService {
   }
 
   /**
-   * Extract chain information from transaction
-   */
-  private extractChainInfo(tx: AccumulatePendingTx): {
-    fromChain?: string;
-    toChain?: string;
-  } {
-    // Most transactions are Accumulate-only
-    const result: { fromChain?: string; toChain?: string } = {
-      fromChain: 'Accumulate',
-    };
-
-    // Check transaction type for cross-chain indicators
-    const txType = tx.type.toLowerCase();
-    if (txType.includes('burn') || txType.includes('bridge')) {
-      // Could be a cross-chain burn/bridge
-      const data = tx.data as Record<string, unknown> | undefined;
-      if (data?.destination || data?.targetChain) {
-        result.toChain = String(data.destination || data.targetChain);
-      }
-    }
-
-    return result;
-  }
-
-  /**
-   * Extract required signatures from transaction
-   */
-  private extractRequiredSignatures(tx: AccumulatePendingTx): number {
-    // Default to 1 if we can't determine
-    // In a real implementation, we'd query the authority structure
-    const data = tx.data as Record<string, unknown> | undefined;
-    if (data?.requiredSignatures) {
-      return Number(data.requiredSignatures);
-    }
-    // Check if authorities specify threshold
-    if (data?.authorities && Array.isArray(data.authorities)) {
-      return data.authorities.length;
-    }
-    return 1;
-  }
-
-  /**
-   * Extract token symbol from token URL
-   */
-  private extractTokenSymbol(tokenUrl: string): string {
-    // Extract symbol from URL like "acc://ACME" or "acc://myadi.acme/tokens/USDC"
-    const parts = tokenUrl.split('/');
-    const last = parts[parts.length - 1];
-    // Handle acc://ACME case
-    if (parts.length === 3 && parts[0] === 'acc:' && parts[1] === '') {
-      return last.toUpperCase();
-    }
-    return last.toUpperCase();
-  }
-
-  /**
-   * Determine transaction status based on signatures
-   */
-  private determineStatus(
-    collected: number,
-    required: number
-  ): 'pending' | 'awaiting_signatures' | 'partially_signed' {
-    if (collected === 0) {
-      return 'pending';
-    }
-    if (collected < required) {
-      return 'partially_signed';
-    }
-    return 'awaiting_signatures';
-  }
-
-  /**
    * Check if a transaction is urgent (expiring within 24 hours)
    */
   private isUrgent(expiresAt: Date): boolean {
@@ -283,15 +181,6 @@ export class StateManagerService {
     const expiry = expiresAt.getTime();
     const timeRemaining = expiry - now;
     return timeRemaining < 24 * 60 * 60 * 1000; // 24 hours
-  }
-
-  /**
-   * Calculate urgency level based on time remaining
-   */
-  private calculateUrgency(timeRemaining: number): 'normal' | 'warning' | 'critical' {
-    if (timeRemaining < 4 * 60 * 60 * 1000) return 'critical'; // < 4 hours
-    if (timeRemaining < 24 * 60 * 60 * 1000) return 'warning'; // < 24 hours
-    return 'normal';
   }
 
   /**

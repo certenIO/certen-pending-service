@@ -59,7 +59,7 @@ export class PendingDiscoveryService {
     // Get all user's public key hashes for signature matching
     const userKeyHashes = this.extractUserKeyHashes(user);
 
-    logger.debug('Starting pending discovery', {
+    logger.info('Starting pending discovery', {
       uid: user.uid.substring(0, 8),
       adiCount: user.adis.length,
       pathCount: signingPaths.length,
@@ -89,7 +89,7 @@ export class PendingDiscoveryService {
       signatures: allSignatures,
     };
 
-    logger.debug('Discovery completed', {
+    logger.info('Discovery completed', {
       uid: user.uid.substring(0, 8),
       eligibleCount: result.totalCount,
     });
@@ -119,6 +119,12 @@ export class PendingDiscoveryService {
         // Query pending for final signer
         const pendingTxs = await this.accumulate.queryPending(finalSigner, {
           count: this.pendingPageSize,
+        });
+
+        logger.info('Phase 1: queried finalSigner for pending', {
+          finalSigner,
+          path: signingPath.path,
+          pendingCount: pendingTxs.length,
         });
 
         for (const tx of pendingTxs) {
@@ -171,6 +177,13 @@ export class PendingDiscoveryService {
           const pendingTxs = await this.accumulate.queryPending(accountUrl, {
             count: this.pendingPageSize,
           });
+
+          if (pendingTxs.length > 0) {
+            logger.info('Phase 2: found pending txs on account', {
+              accountUrl,
+              pendingCount: pendingTxs.length,
+            });
+          }
 
           for (const tx of pendingTxs) {
             const normalizedHash = normalizeHash(tx.hash);
@@ -269,6 +282,12 @@ export class PendingDiscoveryService {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+
+    logger.info('Discovered ADI accounts', {
+      adiUrl: adi.adiUrl,
+      accountCount: accounts.length,
+      accounts,
+    });
 
     return accounts;
   }

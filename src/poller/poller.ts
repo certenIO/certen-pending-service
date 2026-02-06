@@ -150,6 +150,12 @@ export class PendingActionsPoller {
         allPaths.push(...paths);
       }
 
+      logger.info(`[${user.uid.substring(0, 8)}] Signing paths discovered`, {
+        adiCount: user.adis.length,
+        pathCount: allPaths.length,
+        paths: allPaths.map(p => p.path),
+      });
+
       // Discover pending transactions
       const discovery = await this.discoveryService.discoverPendingForUser(
         user,
@@ -157,6 +163,21 @@ export class PendingActionsPoller {
       );
 
       stats.totalPending += discovery.totalCount;
+
+      if (discovery.totalCount > 0) {
+        logger.info(`[${user.uid.substring(0, 8)}] Pending transactions discovered`, {
+          count: discovery.totalCount,
+          transactions: discovery.eligibleTransactions.map(et => ({
+            hash: et.tx.hash.substring(0, 16) + '...',
+            type: et.tx.type,
+            principal: et.tx.principal,
+            category: et.category,
+            signatures: et.tx.signatures.length,
+          })),
+        });
+      } else {
+        logger.info(`[${user.uid.substring(0, 8)}] No pending transactions found`);
+      }
 
       logDiscoveryResult(user.uid, discovery.totalCount, allPaths.length);
 

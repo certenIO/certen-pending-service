@@ -135,16 +135,7 @@ export interface PendingActionDocument {
   principal: string;
   transactionType: string;
 
-  // For cross-chain transfers
-  fromChain?: string;
-  toChain?: string;
-  fromAddress?: string;
-  toAddress?: string;
-  amount?: string;
-  tokenSymbol?: string;
-
   // Signature tracking
-  requiredSignatures: number;
   collectedSignatures: number;
   signatures: SignatureRecord[];
 
@@ -157,11 +148,6 @@ export interface PendingActionDocument {
   updatedAt: Timestamp;
   expiresAt?: Timestamp;
   discoveredAt: Timestamp;
-
-  // Urgency
-  urgencyLevel: 'normal' | 'warning' | 'critical';
-  isExpiring: boolean;
-  timeRemaining: number;
 }
 
 /**
