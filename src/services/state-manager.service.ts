@@ -131,11 +131,8 @@ export class StateManagerService {
     now: Timestamp
   ): PendingActionDocument {
     const tx = eligible.tx;
-    const expiresAt = tx.expiresAt
-      ? this.firestore.createTimestamp(tx.expiresAt)
-      : undefined;
 
-    return {
+    const doc: PendingActionDocument = {
       id: normalizeHash(tx.hash),
       category: eligible.category,
       type: 'transaction',
@@ -154,9 +151,15 @@ export class StateManagerService {
 
       createdAt: now,
       updatedAt: now,
-      expiresAt,
       discoveredAt: now,
     };
+
+    // Only include expiresAt if present (Firestore rejects undefined values)
+    if (tx.expiresAt) {
+      doc.expiresAt = this.firestore.createTimestamp(tx.expiresAt);
+    }
+
+    return doc;
   }
 
   /**
