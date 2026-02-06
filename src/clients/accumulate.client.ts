@@ -81,6 +81,35 @@ export class AccumulateClient {
   }
 
   /**
+   * Query a key book to get its page count
+   */
+  async queryKeyBookPageCount(keyBookUrl: string): Promise<number> {
+    try {
+      const response = await this.call<Record<string, unknown>>('query', {
+        scope: normalizeUrl(keyBookUrl),
+      });
+
+      const data = response.data as Record<string, unknown> | undefined;
+      if (data?.type === 'keyBook' && typeof data.pageCount === 'number') {
+        return data.pageCount;
+      }
+
+      // Fallback: check top-level
+      if (response.type === 'keyBook' && typeof response.pageCount === 'number') {
+        return response.pageCount as number;
+      }
+
+      return 0;
+    } catch (error) {
+      logger.warn('Failed to query key book page count', {
+        keyBookUrl,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return 0;
+    }
+  }
+
+  /**
    * Query a key page to get its entries
    */
   async queryKeyPage(keyPageUrl: string): Promise<AccumulateKeyPage | null> {

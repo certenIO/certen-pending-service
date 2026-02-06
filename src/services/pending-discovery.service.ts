@@ -252,22 +252,26 @@ export class PendingDiscoveryService {
    * Discover all accounts under an ADI
    */
   private async discoverAdiAccounts(adi: CertenAdi): Promise<string[]> {
-    const accounts: string[] = [normalizeUrl(adi.adiUrl)];
+    const accountSet = new Set<string>();
+    const addAccount = (url: string) => accountSet.add(normalizeUrl(url));
+    const keyBookUrls = new Set<string>();
+
+    // Start with the ADI itself
+    addAccount(adi.adiUrl);
 
     // Add accounts from stored ADI data
     for (const account of adi.accounts || []) {
-      accounts.push(normalizeUrl(account.url));
+      addAccount(account.url);
     }
 
-    // Add key books and key pages
+    // Add key books from Firestore
     for (const keyBook of adi.keyBooks || []) {
-      accounts.push(normalizeUrl(keyBook.url));
-      for (const keyPage of keyBook.keyPages || []) {
-        accounts.push(normalizeUrl(keyPage.url));
-      }
+      const bookUrl = normalizeUrl(keyBook.url);
+      addAccount(bookUrl);
+      keyBookUrls.add(bookUrl);
     }
 
-    // Try to query directory for any accounts we might have missed
+    // Query ADI directory for accounts we might have missed
     const directory = await this.accumulate.queryDirectory(adi.adiUrl, {
       count: 100,
     });
@@ -279,16 +283,39 @@ export class PendingDiscoveryService {
         entries: directory,
       });
       for (const entry of directory) {
-        const normalized = normalizeUrl(entry);
-        if (!accounts.includes(normalized)) {
-          accounts.push(normalized);
-        }
+        addAccount(entry);
       }
     } else {
       logger.warn('Directory query returned empty for ADI', {
         adiUrl: adi.adiUrl,
       });
     }
+
+    // For each key book, query Accumulate for page count and enumerate key pages
+    // Include key books found via directory (not just Firestore)
+    for (const entry of directory) {
+      // Directory may contain key books not in Firestore — we'll query all
+      // non-page entries to check page count
+      const normalized = normalizeUrl(entry);
+      if (!keyBookUrls.has(normalized)) {
+        keyBookUrls.add(normalized);
+      }
+    }
+
+    for (const bookUrl of keyBookUrls) {
+      const pageCount = await this.accumulate.queryKeyBookPageCount(bookUrl);
+      if (pageCount > 0) {
+        logger.info('Key book page count', {
+          keyBookUrl: bookUrl,
+          pageCount,
+        });
+        for (let i = 1; i <= pageCount; i++) {
+          addAccount(`${bookUrl}/${i}`);
+        }
+      }
+    }
+
+    const accounts = Array.from(accountSet);
 
     logger.info('Discovered ADI accounts', {
       adiUrl: adi.adiUrl,
