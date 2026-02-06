@@ -183,7 +183,7 @@ export class AccumulateClient {
 
       return response.entries?.map((entry) => normalizeUrl(String(entry))) || [];
     } catch (error) {
-      logger.debug('Failed to query directory', {
+      logger.warn('Failed to query directory', {
         adiUrl,
         error: error instanceof Error ? error.message : String(error),
       });

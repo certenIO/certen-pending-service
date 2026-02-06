@@ -259,15 +259,24 @@ export class PendingDiscoveryService {
       accounts.push(normalizeUrl(account.url));
     }
 
-    // Add key books
+    // Add key books and key pages
     for (const keyBook of adi.keyBooks || []) {
       accounts.push(normalizeUrl(keyBook.url));
+      for (const keyPage of keyBook.keyPages || []) {
+        accounts.push(normalizeUrl(keyPage.url));
+      }
     }
 
     // Try to query directory for any accounts we might have missed
-    try {
-      const directory = await this.accumulate.queryDirectory(adi.adiUrl, {
-        count: 100,
+    const directory = await this.accumulate.queryDirectory(adi.adiUrl, {
+      count: 100,
+    });
+
+    if (directory.length > 0) {
+      logger.info('Directory query returned entries', {
+        adiUrl: adi.adiUrl,
+        directoryCount: directory.length,
+        entries: directory,
       });
       for (const entry of directory) {
         const normalized = normalizeUrl(entry);
@@ -275,11 +284,9 @@ export class PendingDiscoveryService {
           accounts.push(normalized);
         }
       }
-    } catch (error) {
-      // ADI may not have directory access, continue with known accounts
-      logger.debug('Could not query ADI directory', {
+    } else {
+      logger.warn('Directory query returned empty for ADI', {
         adiUrl: adi.adiUrl,
-        error: error instanceof Error ? error.message : String(error),
       });
     }
 
