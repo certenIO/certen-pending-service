@@ -9,11 +9,6 @@ import { AppConfig } from '../config';
 import {
   AccumulatePendingTx,
   AccumulateSignature,
-  SignatureChainEntry,
-  TransactionQueryResponse,
-  PendingQueryResponse,
-  ChainQueryResponse,
-  DirectoryQueryResponse,
   JsonRpcResponse,
   AccumulateKeyPage,
   AccumulateKeyEntry,
@@ -40,38 +35,94 @@ export class AccumulateClient {
   }
 
   /**
-   * Query pending transactions for an account
+   * Query pending transaction IDs for an account (v3 format).
+   * Returns raw txID strings (e.g. "acc://HASH@principal").
+   */
+  async queryPendingTxIds(
+    scope: string,
+    options: { pageSize?: number; maxPages?: number } = {}
+  ): Promise<string[]> {
+    const { pageSize = 200, maxPages = 20 } = options;
+    const txIds: string[] = [];
+    let start = 0;
+
+    for (let page = 0; page < maxPages; page++) {
+      let response: Record<string, unknown>;
+      try {
+        response = await this.call<Record<string, unknown>>('query', {
+          scope: normalizeUrl(scope),
+          query: {
+            queryType: 'pending',
+            range: { start, count: pageSize },
+          },
+        });
+      } catch {
+        break;
+      }
+
+      // Extract records from v3 response (multiple formats)
+      let records: unknown[];
+      const pending = response.pending as Record<string, unknown> | undefined;
+      if (pending && Array.isArray(pending.records)) {
+        // v3 primary: response.pending.records
+        records = pending.records;
+      } else if (response.recordType === 'range' && Array.isArray(response.records)) {
+        // v3 alt: response.records (range format)
+        records = response.records;
+      } else if (Array.isArray(response.items)) {
+        // Legacy fallback: response.items
+        records = response.items;
+      } else {
+        break;
+      }
+
+      // Extract txIDs from records (tolerant parsing like Dart)
+      const pageTxIds = this.extractTxIdsFromRecords(records);
+      txIds.push(...pageTxIds);
+
+      // Pagination: stop if we got fewer than requested
+      if (records.length < pageSize) break;
+      const total = response.total;
+      if (typeof total === 'number' && start + records.length >= total) break;
+
+      start += records.length;
+    }
+
+    // Deduplicate while preserving order
+    const seen = new Set<string>();
+    return txIds.filter(id => {
+      if (!id || seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+  }
+
+  /**
+   * Query pending transactions for an account (full details).
+   * Fetches txIDs then queries each for full transaction data.
    */
   async queryPending(
     scope: string,
-    options: { start?: number; count?: number } = {}
+    options: { count?: number } = {}
   ): Promise<AccumulatePendingTx[]> {
-    const { start = 0, count = 100 } = options;
+    const { count = 200 } = options;
 
-    const response = await this.call<PendingQueryResponse>('query', {
-      scope: normalizeUrl(scope),
-      query: {
-        queryType: 'pending',
-        range: { start, count },
-      },
-    });
+    const txIds = await this.queryPendingTxIds(scope, { pageSize: count });
 
-    if (!response.items || response.items.length === 0) {
+    if (txIds.length === 0) {
       return [];
     }
 
-    // Fetch full transaction details for each pending item
     const pendingTxs: AccumulatePendingTx[] = [];
-    for (const item of response.items) {
+    for (const txId of txIds) {
       try {
-        const txDetails = await this.queryTransaction(item.txid || item.hash);
+        const txDetails = await this.queryTransaction(txId);
         if (txDetails) {
           pendingTxs.push(txDetails);
         }
       } catch (error) {
         logger.warn('Failed to fetch pending transaction details', {
-          txid: item.txid,
-          hash: item.hash,
+          txId,
           error: error instanceof Error ? error.message : String(error),
         });
       }
@@ -168,35 +219,35 @@ export class AccumulateClient {
   }
 
   /**
-   * Query signature chain for a key page (to discover delegations)
+   * Query signature chain for a key book/page.
+   * Returns raw v3 response with records and total count.
    */
   async querySignatureChain(
-    keyPageUrl: string,
-    options: { start?: number; count?: number } = {}
-  ): Promise<SignatureChainEntry[]> {
-    const { start = 0, count = 100 } = options;
+    url: string,
+    options: { start?: number; count?: number; expand?: boolean } = {}
+  ): Promise<{ records: unknown[]; total: number }> {
+    const { start = 0, count = 100, expand = false } = options;
 
     try {
-      const response = await this.call<ChainQueryResponse & { records?: unknown[] }>('query', {
-        scope: normalizeUrl(keyPageUrl),
+      const response = await this.call<Record<string, unknown>>('query', {
+        scope: normalizeUrl(url),
         query: {
           queryType: 'chain',
           name: 'signature',
-          range: { start, count, expand: true },
+          range: { start, count, expand },
         },
       });
 
-      if (!response.records) {
-        return [];
-      }
+      const records = (response.records as unknown[]) || [];
+      const total = typeof response.total === 'number' ? response.total : records.length;
 
-      return response.records.map((record: unknown) => this.parseSignatureChainEntry(record));
+      return { records, total };
     } catch (error) {
       logger.debug('Failed to query signature chain', {
-        keyPageUrl,
+        url,
         error: error instanceof Error ? error.message : String(error),
       });
-      return [];
+      return { records: [], total: 0 };
     }
   }
 
@@ -249,16 +300,29 @@ export class AccumulateClient {
    */
   async queryTransaction(txHashOrId: string): Promise<AccumulatePendingTx | null> {
     try {
-      const response = await this.call<TransactionQueryResponse>('query', {
+      const response = await this.call<Record<string, unknown>>('query', {
         txid: txHashOrId,
       });
 
-      return this.parseTransactionResponse(response);
+      return this.parseTransactionResponse(response, txHashOrId);
     } catch (error) {
       logger.debug('Failed to query transaction', {
         txHashOrId,
         error: error instanceof Error ? error.message : String(error),
       });
+      return null;
+    }
+  }
+
+  /**
+   * Query a transaction and return raw v3 response (for status checking).
+   */
+  async queryTransactionRaw(txHashOrId: string): Promise<Record<string, unknown> | null> {
+    try {
+      return await this.call<Record<string, unknown>>('query', {
+        txid: txHashOrId,
+      });
+    } catch {
       return null;
     }
   }
@@ -275,6 +339,52 @@ export class AccumulateClient {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Extract txID strings from v3 records (tolerant parsing).
+   * Handles: string value, map with txID/txId/id, nested message.txID, direct acc:// string.
+   */
+  private extractTxIdsFromRecords(records: unknown[]): string[] {
+    const out: string[] = [];
+    for (const rec of records) {
+      if (typeof rec === 'object' && rec !== null) {
+        const r = rec as Record<string, unknown>;
+        const v = r.value;
+        // Direct string value (most common v3 format)
+        if (typeof v === 'string' && v.length > 0) {
+          out.push(v);
+          continue;
+        }
+        // Map value with txID/txId/id
+        if (typeof v === 'object' && v !== null) {
+          const vm = v as Record<string, unknown>;
+          const txId = vm.txID || vm.txId || vm.id;
+          if (typeof txId === 'string' && txId.length > 0) {
+            out.push(txId);
+            continue;
+          }
+          // Nested in message
+          if (typeof vm.message === 'object' && vm.message !== null) {
+            const msg = vm.message as Record<string, unknown>;
+            const msgTxId = msg.txID;
+            if (typeof msgTxId === 'string' && msgTxId.length > 0) {
+              out.push(msgTxId);
+              continue;
+            }
+          }
+        }
+        // Legacy: txid or hash fields
+        const txid = r.txid || r.hash;
+        if (typeof txid === 'string' && txid.length > 0) {
+          out.push(txid);
+          continue;
+        }
+      } else if (typeof rec === 'string' && rec.startsWith('acc://')) {
+        out.push(rec);
+      }
+    }
+    return out;
   }
 
   /**
@@ -313,85 +423,244 @@ export class AccumulateClient {
   }
 
   /**
-   * Parse transaction query response into AccumulatePendingTx
+   * Parse v3 transaction query response into AccumulatePendingTx.
+   * Handles multiple v3 response structures for signatures and status.
    */
-  private parseTransactionResponse(response: TransactionQueryResponse): AccumulatePendingTx | null {
-    if (!response || !response.transaction) {
-      return null;
+  private parseTransactionResponse(
+    response: Record<string, unknown>,
+    txIdHint?: string
+  ): AccumulatePendingTx | null {
+    if (!response) return null;
+
+    // v3: transaction data may be in response.message.transaction or response.transaction
+    const message = this.asMap(response.message);
+    const transaction = this.asMap(message.transaction || response.transaction);
+    if (!transaction.header && !transaction.body) {
+      // No transaction data found at all
+      if (!response.status && !response.type) return null;
     }
 
-    const { transaction, status, signatures: sigSets } = response;
-    const header = transaction.header;
-    const body = transaction.body;
+    const header = this.asMap(transaction.header);
+    const body = this.asMap(transaction.body);
 
-    // Parse signatures from signature sets
-    const signatures: AccumulateSignature[] = [];
-    for (const sigSet of sigSets || []) {
-      for (const sig of sigSet.signatures || []) {
-        if (sig.publicKeyHash) {
-          signatures.push({
-            signer: normalizeUrl(sigSet.signer?.url || sig.signer || ''),
-            publicKeyHash: normalizeHash(sig.publicKeyHash),
-            signature: sig.signature || '',
-            timestamp: sig.timestamp ? new Date(sig.timestamp * 1000) : new Date(),
-            vote: this.parseVote(sig.vote || sigSet.vote),
-            transactionHash: sig.transactionHash,
+    // Extract signatures from all three v3 structures
+    const signatures = this.extractSignaturesV3(response);
+
+    // Determine status (v3 supports string, map, and code formats)
+    const statusStr = this.parseStatusV3(response);
+
+    // Extract txId and hash
+    const txId = String(response.id || response.txid || txIdHint || '');
+    const hash = normalizeHash(txId || String(response.hash || ''));
+
+    return {
+      txId,
+      hash,
+      principal: normalizeUrl(String(header.principal || '')),
+      type: String(body.type || message.type || ''),
+      status: statusStr,
+      signatures,
+      expiresAt: header.expire ? new Date(Number(header.expire) * 1000) : undefined,
+      data: body as unknown as AccumulatePendingTx['data'],
+    };
+  }
+
+  /**
+   * Extract signatures from v3 transaction response.
+   * Handles three structures:
+   *   1. signatures.records[].signatures.records[].message.signature (nested)
+   *   2. signatureBooks.pages[].signatures (paginated)
+   *   3. signatures as flat array (legacy)
+   */
+  private extractSignaturesV3(txResult: Record<string, unknown>): AccumulateSignature[] {
+    const out: AccumulateSignature[] = [];
+    const sigField = txResult.signatures;
+
+    // STRUCTURE 1: signatures.records[].signatures.records[].message.signature
+    if (typeof sigField === 'object' && sigField !== null && !Array.isArray(sigField)) {
+      const sigRange = sigField as Record<string, unknown>;
+      const sets = sigRange.records;
+      if (Array.isArray(sets)) {
+        for (const set of sets) {
+          const setMap = this.asMap(set);
+          const inner = this.asMap(setMap.signatures);
+          const recs = inner.records;
+          if (!Array.isArray(recs)) continue;
+
+          for (const rec of recs) {
+            const recMap = this.asMap(rec);
+            const msg = this.asMap(recMap.message);
+            if (String(msg.type || '') !== 'signature') continue;
+
+            const sig = this.asMap(msg.signature);
+            const signerUrl = this.deepFindSigner(sig);
+            if (!signerUrl) continue;
+
+            out.push({
+              signer: normalizeUrl(signerUrl),
+              publicKeyHash: normalizeHash(String(sig.publicKeyHash || '')),
+              signature: String(sig.signature || ''),
+              timestamp: this.parseMicrosTimestamp(sig.timestamp),
+              vote: this.parseVote(sig.vote),
+            });
+          }
+        }
+      }
+    }
+
+    // STRUCTURE 2: signatureBooks.pages[].signatures
+    const books = txResult.signatureBooks;
+    if (Array.isArray(books)) {
+      for (const book of books) {
+        const pages = this.asMap(book).pages;
+        if (!Array.isArray(pages)) continue;
+        for (const page of pages) {
+          const pageSigs = this.asMap(page).signatures;
+          const recs = Array.isArray(pageSigs)
+            ? pageSigs
+            : (typeof pageSigs === 'object' && pageSigs !== null
+                ? (pageSigs as Record<string, unknown>).records
+                : null);
+          if (!Array.isArray(recs)) continue;
+
+          for (const rec of recs) {
+            const recMap = this.asMap(rec);
+            const msg = this.asMap(recMap.message);
+            if (String(msg.type || '') !== 'signature') continue;
+
+            const sig = this.asMap(msg.signature);
+            const signerUrl = this.deepFindSigner(sig);
+            if (!signerUrl) continue;
+
+            out.push({
+              signer: normalizeUrl(signerUrl),
+              publicKeyHash: normalizeHash(String(sig.publicKeyHash || '')),
+              signature: String(sig.signature || ''),
+              timestamp: this.parseMicrosTimestamp(sig.timestamp),
+              vote: this.parseVote(sig.vote),
+            });
+          }
+        }
+      }
+    }
+
+    // STRUCTURE 3: signatures as flat array (legacy/simple)
+    if (Array.isArray(sigField)) {
+      for (const sigSet of sigField) {
+        const setMap = this.asMap(sigSet);
+        const signerUrl = setMap.signer;
+        const setSignerUrl = typeof signerUrl === 'object' && signerUrl !== null
+          ? String((signerUrl as Record<string, unknown>).url || '')
+          : String(signerUrl || '');
+
+        const innerSigs = setMap.signatures;
+        if (Array.isArray(innerSigs)) {
+          for (const sig of innerSigs) {
+            const s = this.asMap(sig);
+            if (s.publicKeyHash) {
+              out.push({
+                signer: normalizeUrl(setSignerUrl || String(s.signer || '')),
+                publicKeyHash: normalizeHash(String(s.publicKeyHash)),
+                signature: String(s.signature || ''),
+                timestamp: s.timestamp ? new Date(Number(s.timestamp) * 1000) : new Date(),
+                vote: this.parseVote(s.vote || setMap.vote),
+                transactionHash: s.transactionHash ? String(s.transactionHash) : undefined,
+              });
+            }
+          }
+        } else if (setSignerUrl) {
+          // Single signature entry in flat array
+          out.push({
+            signer: normalizeUrl(setSignerUrl),
+            publicKeyHash: normalizeHash(String(setMap.publicKeyHash || '')),
+            signature: String(setMap.signature || ''),
+            timestamp: setMap.timestamp ? new Date(Number(setMap.timestamp) * 1000) : new Date(),
+            vote: this.parseVote(setMap.vote),
           });
         }
       }
     }
 
-    // Determine status
-    const statusStr = status?.pending ? 'pending' : status?.delivered ? 'delivered' : 'unknown';
-
-    return {
-      txId: '', // Will be populated from the query
-      hash: '', // Will be populated from the query
-      principal: normalizeUrl(header.principal),
-      type: body.type,
-      status: statusStr,
-      signatures,
-      expiresAt: header.expire ? new Date(header.expire * 1000) : undefined,
-      data: body,
-    };
+    // Deduplicate by signer+timestamp
+    const seen = new Set<string>();
+    return out.filter(s => {
+      const key = `${s.signer}|${s.publicKeyHash}|${s.timestamp?.getTime() || ''}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }
 
   /**
-   * Parse a signature chain entry
+   * Recursively find signer URL in nested delegated signature structures.
    */
-  private parseSignatureChainEntry(record: unknown): SignatureChainEntry {
-    const rec = record as Record<string, unknown>;
-    const value = rec.value as Record<string, unknown> || rec;
-
-    return {
-      type: String(value.type || 'unknown'),
-      txId: String(value.txid || ''),
-      hash: String(value.hash || ''),
-      principal: normalizeUrl(String(value.principal || '')),
-      status: String(value.status || 'unknown'),
-      body: value.body as SignatureChainEntry['body'],
-      signatures: this.parseSignatures(value.signatures),
-    };
+  private deepFindSigner(sig: Record<string, unknown>): string | null {
+    const s = sig.signer;
+    if (typeof s === 'string' && s.length > 0) return s;
+    const inner = this.asMap(sig.signature);
+    if (Object.keys(inner).length === 0) return null;
+    return this.deepFindSigner(inner);
   }
 
   /**
-   * Parse signatures array
+   * Parse v3 status field (string, map, or code).
    */
-  private parseSignatures(sigs: unknown): AccumulateSignature[] {
-    if (!Array.isArray(sigs)) {
-      return [];
+  private parseStatusV3(response: Record<string, unknown>): string {
+    const statusField = response.status;
+
+    // String format: "pending", "delivered"
+    if (typeof statusField === 'string') {
+      return statusField.toLowerCase();
     }
 
-    return sigs.map((sig: unknown) => {
-      const s = sig as Record<string, unknown>;
-      return {
-        signer: normalizeUrl(String(s.signer || '')),
-        publicKeyHash: normalizeHash(String(s.publicKeyHash || '')),
-        signature: String(s.signature || ''),
-        timestamp: s.timestamp ? new Date(Number(s.timestamp) * 1000) : new Date(),
-        vote: this.parseVote(s.vote),
-      };
-    });
+    // Map format: { code: "pending"|202, pending: true }
+    if (typeof statusField === 'object' && statusField !== null) {
+      const statusMap = statusField as Record<string, unknown>;
+      const code = statusMap.code;
+
+      // Numeric code: 202=pending, 201=delivered
+      if (typeof code === 'number') {
+        if (code === 202) return 'pending';
+        if (code === 201) return 'delivered';
+        return 'unknown';
+      }
+
+      // String code
+      if (typeof code === 'string') {
+        const c = code.toLowerCase();
+        if (c === 'pending') return 'pending';
+        if (c === 'delivered' || c === 'ok') return 'delivered';
+        return c;
+      }
+
+      // Boolean flag fallback
+      if (statusMap.pending === true) return 'pending';
+      if (statusMap.delivered === true) return 'delivered';
+    }
+
+    return 'unknown';
+  }
+
+  /**
+   * Parse microsecond timestamp from v3 API.
+   */
+  private parseMicrosTimestamp(ts: unknown): Date {
+    if (!ts) return new Date();
+    const n = Number(ts);
+    // v3 uses microseconds (> 1e15), v2 uses seconds (< 1e12)
+    if (n > 1e15) return new Date(n / 1000);
+    if (n > 1e12) return new Date(n);
+    return new Date(n * 1000);
+  }
+
+  /**
+   * Safely cast unknown to Record<string, unknown>.
+   */
+  private asMap(v: unknown): Record<string, unknown> {
+    if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+      return v as Record<string, unknown>;
+    }
+    return {};
   }
 
   /**

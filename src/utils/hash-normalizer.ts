@@ -5,21 +5,40 @@
  */
 
 /**
- * Normalize a transaction hash to lowercase without 0x prefix
- * This ensures consistent comparison and storage of hashes.
+ * Normalize a transaction hash to a canonical lowercase hex string.
+ * Strips: 0x prefix, acc:// prefix, @principal suffix, path segments.
+ * Aligned with Dart service's normalizeHash().
  */
 export function normalizeHash(hash: string): string {
   if (!hash) {
     return '';
   }
 
-  // Remove 0x prefix if present
-  let normalized = hash.toLowerCase();
+  let normalized = hash.trim().toLowerCase();
+
+  // Remove 0x prefix
   if (normalized.startsWith('0x')) {
     normalized = normalized.substring(2);
   }
 
-  return normalized;
+  // Remove acc:// prefix (txId format: acc://HASH@principal)
+  if (normalized.startsWith('acc://')) {
+    normalized = normalized.substring(6);
+  }
+
+  // Remove @principal suffix
+  const atIndex = normalized.indexOf('@');
+  if (atIndex > 0) {
+    normalized = normalized.substring(0, atIndex);
+  }
+
+  // Remove path segments
+  const slashIndex = normalized.indexOf('/');
+  if (slashIndex > 0) {
+    normalized = normalized.substring(0, slashIndex);
+  }
+
+  return normalized.trim();
 }
 
 /**

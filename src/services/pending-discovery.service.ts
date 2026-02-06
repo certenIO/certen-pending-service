@@ -2,7 +2,7 @@
  * Pending Discovery Service
  *
  * Core algorithm for discovering pending transactions that a user can sign.
- * Implements a dual-phase algorithm aligned with the Dart service.
+ * Implements a three-phase algorithm aligned with the Dart service.
  */
 
 import { AccumulateClient } from '../clients/accumulate.client';
@@ -30,7 +30,7 @@ export class PendingDiscoveryService {
   }
 
   /**
-   * DUAL-PHASE ALGORITHM (aligned with Dart service)
+   * THREE-PHASE ALGORITHM (aligned with Dart service)
    *
    * Phase 1: Signing Path Processing
    *   For each user's signing path (A -> B -> C):
@@ -44,8 +44,15 @@ export class PendingDiscoveryService {
    *   - Check if user's primary signer has signed
    *   - Include if user has NOT signed
    *
-   * Phase 3: Deduplication
-   *   - Combine results from both phases
+   * Phase 3: Signature Chain Scan
+   *   For each key book:
+   *   - Scan last N entries of signature chain
+   *   - Find signatureRequest messages
+   *   - Extract produced txIDs and verify still pending
+   *   - Catches transactions missed by Phases 1-2
+   *
+   * Phase 4: Deduplication
+   *   - Combine results from all phases
    *   - Deduplicate by transaction hash
    *   - Return unique eligible transactions
    */
@@ -82,7 +89,17 @@ export class PendingDiscoveryService {
       allSignatures
     );
 
-    // PHASE 3: Build final result (deduplication already handled by Map)
+    // PHASE 3: Signature chain scan
+    const seenHashes = new Set(eligibleTxs.keys());
+    await this.scanSignatureChains(
+      user,
+      userKeyHashes,
+      seenHashes,
+      eligibleTxs,
+      allSignatures
+    );
+
+    // PHASE 4: Build final result (deduplication already handled by Map)
     const result: DiscoveryResult = {
       eligibleTransactions: Array.from(eligibleTxs.values()),
       totalCount: eligibleTxs.size,
@@ -210,6 +227,135 @@ export class PendingDiscoveryService {
         }
       }
     }
+  }
+
+  /**
+   * Phase 3: Scan key book signature chains for signatureRequest messages.
+   * Catches pending transactions missed by Phases 1-2 (e.g. cross-ADI requests).
+   */
+  private async scanSignatureChains(
+    user: CertenUserWithAdis,
+    userKeyHashes: Set<string>,
+    seenHashes: Set<string>,
+    eligibleTxs: Map<string, EligibleTransaction>,
+    allSignatures: Map<string, AccumulateSignature[]>
+  ): Promise<void> {
+    const maxEntries = 30;
+
+    for (const adi of user.adis) {
+      // Collect key book URLs
+      const keyBookUrls = new Set<string>();
+      for (const keyBook of adi.keyBooks || []) {
+        keyBookUrls.add(normalizeUrl(keyBook.url));
+      }
+      // Also check directory for key books
+      const directory = await this.accumulate.queryDirectory(adi.adiUrl, { count: 100 });
+      for (const entry of directory) {
+        keyBookUrls.add(normalizeUrl(entry));
+      }
+
+      for (const bookUrl of keyBookUrls) {
+        try {
+          // Get total signature chain length
+          const { total } = await this.accumulate.querySignatureChain(bookUrl, {
+            start: 0, count: 1, expand: false,
+          });
+
+          if (total === 0) continue;
+
+          // Query last N entries (most recent)
+          const startIndex = total > maxEntries ? total - maxEntries : 0;
+          const count = total > maxEntries ? maxEntries : total;
+
+          const { records } = await this.accumulate.querySignatureChain(bookUrl, {
+            start: startIndex, count, expand: true,
+          });
+
+          let sigReqCount = 0;
+          let foundPending = 0;
+
+          for (const rec of records) {
+            if (typeof rec !== 'object' || rec === null) continue;
+            const recMap = rec as Record<string, unknown>;
+            const value = (recMap.value || recMap) as Record<string, unknown>;
+            const message = (value.message || {}) as Record<string, unknown>;
+            const msgType = String(message.type || '');
+
+            if (msgType !== 'signatureRequest') continue;
+            sigReqCount++;
+
+            // Extract produced transaction IDs
+            const produced = (value.produced || {}) as Record<string, unknown>;
+            const producedRecords = (produced.records || []) as unknown[];
+
+            for (const prodRec of producedRecords) {
+              if (typeof prodRec !== 'object' || prodRec === null) continue;
+              const prodMap = prodRec as Record<string, unknown>;
+              const prodTxId = String(prodMap.value || prodMap.id || '');
+              if (!prodTxId) continue;
+
+              const txHash = normalizeHash(prodTxId);
+              if (!txHash || seenHashes.has(txHash)) continue;
+              seenHashes.add(txHash);
+
+              // Query this transaction to check if still pending
+              const txRaw = await this.accumulate.queryTransactionRaw(prodTxId);
+              if (!txRaw) continue;
+
+              const status = this.extractStatus(txRaw);
+              if (status !== 'pending') continue;
+
+              // It's pending — fetch full details
+              const txDetails = await this.accumulate.queryTransaction(prodTxId);
+              if (!txDetails) continue;
+
+              foundPending++;
+
+              // Check if user has already signed
+              const userHasSigned = this.hasUserSigned(txDetails.signatures, userKeyHashes);
+              if (!userHasSigned) {
+                this.addEligibleTx(eligibleTxs, txDetails, bookUrl, 'requiring_signature');
+
+                if (!allSignatures.has(txHash)) {
+                  allSignatures.set(txHash, txDetails.signatures);
+                }
+              }
+            }
+          }
+
+          if (sigReqCount > 0) {
+            logger.info('Phase 3: scanned signature chain', {
+              bookUrl,
+              total,
+              sigReqCount,
+              foundPending,
+            });
+          }
+        } catch (error) {
+          logger.warn('Failed to scan signature chain', {
+            bookUrl,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
+  }
+
+  /**
+   * Extract status string from raw v3 transaction response.
+   */
+  private extractStatus(txRaw: Record<string, unknown>): string {
+    const statusField = txRaw.status;
+    if (typeof statusField === 'string') return statusField.toLowerCase();
+    if (typeof statusField === 'object' && statusField !== null) {
+      const s = statusField as Record<string, unknown>;
+      const code = s.code;
+      if (typeof code === 'number') return code === 202 ? 'pending' : code === 201 ? 'delivered' : 'other';
+      if (typeof code === 'string') return code.toLowerCase();
+      if (s.pending === true) return 'pending';
+      if (s.delivered === true) return 'delivered';
+    }
+    return 'unknown';
   }
 
   /**
