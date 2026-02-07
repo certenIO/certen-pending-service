@@ -21,6 +21,12 @@ import { normalizeHash, normalizePublicKeyHash } from '../utils/hash-normalizer'
 import { logger } from '../utils/logger';
 
 export class PendingDiscoveryService {
+  private static readonly GOVERNANCE_TX_TYPES = new Set([
+    'createIdentity', 'createKeyPage', 'createKeyBook',
+    'updateKeyPage', 'updateAccountAuth', 'updateKey',
+    'lockAccount', 'activateProtocolVersion', 'networkMaintenance',
+  ]);
+
   private readonly accumulate: AccumulateClient;
   private readonly pendingPageSize: number;
 
@@ -176,7 +182,7 @@ export class PendingDiscoveryService {
               eligibleTxs,
               tx,
               signingPath.path,
-              'requiring_signature'
+              this.determineCategory(tx)
             );
           }
         }
@@ -231,7 +237,7 @@ export class PendingDiscoveryService {
             const userHasSigned = this.hasUserSigned(tx.signatures, userKeyHashes);
 
             if (!userHasSigned) {
-              const category = this.determineCategory(tx, adi.adiUrl);
+              const category = this.determineCategory(tx);
               // Record all signing paths for this ADI
               for (const path of adiSigningPaths) {
                 this.addEligibleTx(eligibleTxs, tx, path, category);
@@ -341,7 +347,7 @@ export class PendingDiscoveryService {
                 const adiUrl = extractAdiFromUrl(bookUrl);
                 const adiPaths = pathsByAdi.get(adiUrl) || [bookUrl];
                 for (const path of adiPaths) {
-                  this.addEligibleTx(eligibleTxs, txDetails, path, 'requiring_signature');
+                  this.addEligibleTx(eligibleTxs, txDetails, path, this.determineCategory(txDetails));
                 }
 
                 if (!allSignatures.has(txHash)) {
@@ -484,21 +490,12 @@ export class PendingDiscoveryService {
   }
 
   /**
-   * Determine the category for a pending transaction
+   * Determine the category for a pending transaction based on its type
    */
-  private determineCategory(
-    tx: AccumulatePendingTx,
-    adiUrl: string
-  ): 'initiated_by_user' | 'requiring_signature' {
-    // Check if transaction principal is under user's ADI
-    const txAdi = extractAdiFromUrl(tx.principal);
-    const userAdi = normalizeUrl(adiUrl);
-
-    if (txAdi === userAdi) {
-      return 'initiated_by_user';
-    }
-
-    return 'requiring_signature';
+  private determineCategory(tx: AccumulatePendingTx): 'governance' | 'transactions' {
+    return PendingDiscoveryService.GOVERNANCE_TX_TYPES.has(tx.type)
+      ? 'governance'
+      : 'transactions';
   }
 
   /**
@@ -508,7 +505,7 @@ export class PendingDiscoveryService {
     map: Map<string, EligibleTransaction>,
     tx: AccumulatePendingTx,
     signingPath: string,
-    category: 'initiated_by_user' | 'requiring_signature'
+    category: 'governance' | 'transactions'
   ): void {
     const hash = normalizeHash(tx.hash);
 
@@ -523,10 +520,8 @@ export class PendingDiscoveryService {
       if (!existing.eligiblePaths.includes(signingPath)) {
         existing.eligiblePaths.push(signingPath);
       }
-      // Keep the more privileged category (initiated > requiring)
-      if (category === 'initiated_by_user') {
-        existing.category = 'initiated_by_user';
-      }
+      // Both paths will agree on category since it's deterministic by tx type,
+      // but keep the first one seen
     }
   }
 }

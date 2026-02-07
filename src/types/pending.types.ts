@@ -29,7 +29,7 @@ export interface EligibleTransaction {
   /** All signing paths that can sign this transaction */
   eligiblePaths: string[];
   /** Category for the transaction */
-  category: 'initiated_by_user' | 'requiring_signature';
+  category: 'governance' | 'transactions';
 }
 
 /**

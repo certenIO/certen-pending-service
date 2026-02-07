@@ -125,7 +125,7 @@ export interface SignatureRecord {
  */
 export interface PendingActionDocument {
   id: string;
-  category: 'initiated_by_user' | 'requiring_signature' | 'relationship_requests';
+  category: 'governance' | 'transactions';
   type: 'transaction' | 'signature_request' | 'delegation_request';
   status: 'pending' | 'awaiting_signatures' | 'partially_signed';
 
@@ -157,8 +157,8 @@ export interface PendingActionDocument {
 export interface ComputedPendingState {
   count: number;
   urgentCount: number;
-  initiatedCount: number;
-  requiresSignatureCount: number;
+  governanceCount: number;
+  transactionsCount: number;
   txHashes: string[];
   computedAt: Timestamp;
   cycleToken: string;

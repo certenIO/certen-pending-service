@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh root@116.202.214.38 \"ls -la /opt/certen-pending-service/\")",
+      "Bash(ssh:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nincrease default poll interval from 45s to 10min to stay under Firestore free tier quota\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push:*)",
+      "Bash(npm run build:*)",
+      "Bash(git commit:*)"
+    ]
+  }
+}

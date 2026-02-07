@@ -77,11 +77,11 @@ export class StateManagerService {
       urgentCount: discovery.eligibleTransactions.filter(t =>
         t.tx.expiresAt && this.isUrgent(t.tx.expiresAt)
       ).length,
-      initiatedCount: discovery.eligibleTransactions.filter(t =>
-        t.category === 'initiated_by_user'
+      governanceCount: discovery.eligibleTransactions.filter(t =>
+        t.category === 'governance'
       ).length,
-      requiresSignatureCount: discovery.eligibleTransactions.filter(t =>
-        t.category === 'requiring_signature'
+      transactionsCount: discovery.eligibleTransactions.filter(t =>
+        t.category === 'transactions'
       ).length,
       txHashes: Array.from(newHashes),
       computedAt: now,
