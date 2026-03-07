@@ -15,6 +15,9 @@ secrets/
 *.key
 service-account*.json
 
+# Claude Code
+.claude/
+
 # IDE
 .idea/
 .vscode/
