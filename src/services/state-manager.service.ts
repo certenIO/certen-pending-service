@@ -154,8 +154,8 @@ export class StateManagerService {
       discoveredAt: now,
     };
 
-    // Only include expiresAt if present (Firestore rejects undefined values)
-    if (tx.expiresAt) {
+    // Only include expiresAt if present and valid (Firestore rejects undefined/NaN values)
+    if (tx.expiresAt && !isNaN(tx.expiresAt.getTime())) {
       doc.expiresAt = this.firestore.createTimestamp(tx.expiresAt);
     }
 

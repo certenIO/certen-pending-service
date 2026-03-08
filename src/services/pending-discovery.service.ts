@@ -399,6 +399,7 @@ export class PendingDiscoveryService {
     const hashes = new Set<string>();
 
     for (const adi of user.adis) {
+      // Check nested keyBooks -> keyPages -> entries (preferred)
       for (const keyBook of adi.keyBooks || []) {
         for (const keyPage of keyBook.keyPages || []) {
           for (const entry of keyPage.entries || []) {
@@ -407,6 +408,13 @@ export class PendingDiscoveryService {
             }
           }
         }
+      }
+
+      // Fallback: top-level publicKeyHash on ADI document
+      // (keyPages may be empty if populated before nested structure was added)
+      const topLevel = (adi as unknown as Record<string, unknown>).publicKeyHash;
+      if (typeof topLevel === 'string' && topLevel && hashes.size === 0) {
+        hashes.add(normalizePublicKeyHash(topLevel));
       }
     }
 
