@@ -16,7 +16,7 @@ import {
 import { withRetry } from '../utils/retry';
 import { logger, logRpcCall } from '../utils/logger';
 import { normalizeUrl } from '../utils/url-normalizer';
-import { normalizeHash } from '../utils/hash-normalizer';
+import { normalizeHash, publicKeyToHash } from '../utils/hash-normalizer';
 
 export class AccumulateClient {
   private readonly rpcUrl: string;
@@ -498,7 +498,7 @@ export class AccumulateClient {
 
             out.push({
               signer: normalizeUrl(signerUrl),
-              publicKeyHash: normalizeHash(String(sig.publicKeyHash || '')),
+              publicKeyHash: this.resolvePublicKeyHash(sig),
               signature: String(sig.signature || ''),
               timestamp: this.parseMicrosTimestamp(sig.timestamp),
               vote: this.parseVote(sig.vote),
@@ -534,7 +534,7 @@ export class AccumulateClient {
 
             out.push({
               signer: normalizeUrl(signerUrl),
-              publicKeyHash: normalizeHash(String(sig.publicKeyHash || '')),
+              publicKeyHash: this.resolvePublicKeyHash(sig),
               signature: String(sig.signature || ''),
               timestamp: this.parseMicrosTimestamp(sig.timestamp),
               vote: this.parseVote(sig.vote),
@@ -557,10 +557,11 @@ export class AccumulateClient {
         if (Array.isArray(innerSigs)) {
           for (const sig of innerSigs) {
             const s = this.asMap(sig);
-            if (s.publicKeyHash) {
+            const resolvedHash = this.resolvePublicKeyHash(s);
+            if (resolvedHash) {
               out.push({
                 signer: normalizeUrl(setSignerUrl || String(s.signer || '')),
-                publicKeyHash: normalizeHash(String(s.publicKeyHash)),
+                publicKeyHash: resolvedHash,
                 signature: String(s.signature || ''),
                 timestamp: s.timestamp ? new Date(Number(s.timestamp) * 1000) : new Date(),
                 vote: this.parseVote(s.vote || setMap.vote),
@@ -572,7 +573,7 @@ export class AccumulateClient {
           // Single signature entry in flat array
           out.push({
             signer: normalizeUrl(setSignerUrl),
-            publicKeyHash: normalizeHash(String(setMap.publicKeyHash || '')),
+            publicKeyHash: this.resolvePublicKeyHash(setMap),
             signature: String(setMap.signature || ''),
             timestamp: setMap.timestamp ? new Date(Number(setMap.timestamp) * 1000) : new Date(),
             vote: this.parseVote(setMap.vote),
@@ -661,6 +662,20 @@ export class AccumulateClient {
       return v as Record<string, unknown>;
     }
     return {};
+  }
+
+  /**
+   * Resolve publicKeyHash from a signature object.
+   * Uses publicKeyHash if present, otherwise computes SHA256(publicKey).
+   */
+  private resolvePublicKeyHash(sig: Record<string, unknown>): string {
+    if (sig.publicKeyHash) {
+      return normalizeHash(String(sig.publicKeyHash));
+    }
+    if (sig.publicKey) {
+      return publicKeyToHash(String(sig.publicKey));
+    }
+    return '';
   }
 
   /**

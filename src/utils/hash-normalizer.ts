@@ -4,6 +4,8 @@
  * Normalizes transaction hashes to a consistent format for comparison and storage.
  */
 
+import { createHash } from 'crypto';
+
 /**
  * Normalize a transaction hash to a canonical lowercase hex string.
  * Strips: 0x prefix, acc:// prefix, @principal suffix, path segments.
@@ -90,4 +92,15 @@ export function publicKeyHashInSet(
   hashSet: Set<string>
 ): boolean {
   return hashSet.has(normalizePublicKeyHash(hash));
+}
+
+/**
+ * Compute publicKeyHash from a raw publicKey hex string.
+ * In Accumulate, publicKeyHash = SHA256(publicKey).
+ */
+export function publicKeyToHash(publicKeyHex: string): string {
+  const normalized = normalizeHash(publicKeyHex);
+  if (!normalized) return '';
+  const keyBytes = Buffer.from(normalized, 'hex');
+  return createHash('sha256').update(keyBytes).digest('hex');
 }
