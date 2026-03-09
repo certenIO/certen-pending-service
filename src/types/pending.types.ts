@@ -38,8 +38,12 @@ export interface EligibleTransaction {
 export interface DiscoveryResult {
   /** Transactions eligible for signing */
   eligibleTransactions: EligibleTransaction[];
-  /** Total count */
+  /** Transactions user already signed, still awaiting other authorities */
+  awaitingOthersTransactions: EligibleTransaction[];
+  /** Total count (eligible only) */
   totalCount: number;
+  /** Count of awaiting-others transactions */
+  awaitingOthersCount: number;
   /** All signatures by transaction hash */
   signatures: Map<string, AccumulateSignature[]>;
 }

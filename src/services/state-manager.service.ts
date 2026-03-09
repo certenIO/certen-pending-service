@@ -44,29 +44,48 @@ export class StateManagerService {
     // Get current pending actions to detect changes
     const currentPending = await this.firestore.getPendingActions(uid);
     const currentHashes = new Set(currentPending.map(p => p.id));
-    const newHashes = new Set(
-      discovery.eligibleTransactions.map(t => normalizeHash(t.tx.hash))
-    );
+
+    // Combine eligible + awaiting_others hashes
+    const allEligible = discovery.eligibleTransactions;
+    const allAwaiting = discovery.awaitingOthersTransactions;
+    const newHashes = new Set([
+      ...allEligible.map(t => normalizeHash(t.tx.hash)),
+      ...allAwaiting.map(t => normalizeHash(t.tx.hash)),
+    ]);
 
     // Determine what to remove and what to add/update
     const toRemove: string[] = [];
     const toAdd: PendingActionDocument[] = [];
 
-    // Remove pending actions that are no longer pending
+    // Remove pending actions that are no longer pending (either type)
     for (const doc of currentPending) {
       if (!newHashes.has(doc.id)) {
         toRemove.push(doc.id);
       }
     }
 
-    // Add or update pending actions
-    for (const eligible of discovery.eligibleTransactions) {
+    // Add or update eligible transactions (needs user's signature)
+    for (const eligible of allEligible) {
       const hash = normalizeHash(eligible.tx.hash);
       const signatures = discovery.signatures.get(hash) || eligible.tx.signatures;
       const pendingAction = this.buildPendingActionDocument(
         eligible,
         signatures,
-        now
+        now,
+        false
+      );
+      toAdd.push(pendingAction);
+    }
+
+    // Add or update awaiting-others transactions (user already signed)
+    for (const awaiting of allAwaiting) {
+      const hash = normalizeHash(awaiting.tx.hash);
+      const signatures = discovery.signatures.get(hash) || awaiting.tx.signatures;
+      const pendingAction = this.buildPendingActionDocument(
+        awaiting,
+        signatures,
+        now,
+        true
       );
       toAdd.push(pendingAction);
     }
@@ -74,15 +93,16 @@ export class StateManagerService {
     // Build computed state for quick badge access
     const computedState: ComputedPendingState = {
       count: discovery.totalCount,
-      urgentCount: discovery.eligibleTransactions.filter(t =>
+      urgentCount: allEligible.filter(t =>
         t.tx.expiresAt && this.isUrgent(t.tx.expiresAt)
       ).length,
-      governanceCount: discovery.eligibleTransactions.filter(t =>
+      governanceCount: allEligible.filter(t =>
         t.category === 'governance'
       ).length,
-      transactionsCount: discovery.eligibleTransactions.filter(t =>
+      transactionsCount: allEligible.filter(t =>
         t.category === 'transactions'
       ).length,
+      awaitingOthersCount: discovery.awaitingOthersCount,
       txHashes: Array.from(newHashes),
       computedAt: now,
       cycleToken,
@@ -111,7 +131,8 @@ export class StateManagerService {
       uid: uid.substring(0, 8),
       added: toAdd.length,
       removed: toRemove.length,
-      total: discovery.totalCount,
+      eligible: discovery.totalCount,
+      awaitingOthers: discovery.awaitingOthersCount,
     });
 
     return {
@@ -128,15 +149,25 @@ export class StateManagerService {
   private buildPendingActionDocument(
     eligible: EligibleTransaction,
     signatures: AccumulateSignature[],
-    now: Timestamp
+    now: Timestamp,
+    userHasSigned: boolean
   ): PendingActionDocument {
     const tx = eligible.tx;
+
+    let status: PendingActionDocument['status'];
+    if (userHasSigned) {
+      status = 'awaiting_others';
+    } else if (signatures.length > 0) {
+      status = 'partially_signed';
+    } else {
+      status = 'pending';
+    }
 
     const doc: PendingActionDocument = {
       id: normalizeHash(tx.hash),
       category: eligible.category,
       type: 'transaction',
-      status: signatures.length > 0 ? 'partially_signed' : 'pending',
+      status,
 
       txHash: tx.hash,
       txId: tx.txId,
@@ -147,7 +178,7 @@ export class StateManagerService {
       signatures: signatures.map(s => this.convertSignature(s, now)),
 
       eligibleSigningPaths: eligible.eligiblePaths,
-      userHasSigned: false,
+      userHasSigned,
 
       createdAt: now,
       updatedAt: now,

@@ -180,14 +180,21 @@ export class PendingActionsPoller {
 
       stats.totalPending += discovery.totalCount;
 
-      if (discovery.totalCount > 0) {
+      if (discovery.totalCount > 0 || discovery.awaitingOthersCount > 0) {
         logger.info(`[${user.uid.substring(0, 8)}] Pending transactions discovered`, {
-          count: discovery.totalCount,
+          eligible: discovery.totalCount,
+          awaitingOthers: discovery.awaitingOthersCount,
           transactions: discovery.eligibleTransactions.map(et => ({
             hash: et.tx.hash.substring(0, 16) + '...',
             type: et.tx.type,
             principal: et.tx.principal,
             category: et.category,
+            signatures: et.tx.signatures.length,
+          })),
+          awaitingOthersTxs: discovery.awaitingOthersTransactions.map(et => ({
+            hash: et.tx.hash.substring(0, 16) + '...',
+            type: et.tx.type,
+            principal: et.tx.principal,
             signatures: et.tx.signatures.length,
           })),
         });

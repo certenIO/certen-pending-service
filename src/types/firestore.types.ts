@@ -127,7 +127,7 @@ export interface PendingActionDocument {
   id: string;
   category: 'governance' | 'transactions';
   type: 'transaction' | 'signature_request' | 'delegation_request';
-  status: 'pending' | 'awaiting_signatures' | 'partially_signed';
+  status: 'pending' | 'awaiting_signatures' | 'partially_signed' | 'awaiting_others';
 
   // Transaction details
   txHash: string;
@@ -159,6 +159,7 @@ export interface ComputedPendingState {
   urgentCount: number;
   governanceCount: number;
   transactionsCount: number;
+  awaitingOthersCount: number;
   txHashes: string[];
   computedAt: Timestamp;
   cycleToken: string;
