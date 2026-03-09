@@ -182,6 +182,44 @@ export interface PendingActionDocument {
 }
 
 /**
+ * Structured signing path hop for Firestore storage
+ */
+export interface FirestoreSigningPathHop {
+  /** Key page URL */
+  url: string;
+  /** Parent key book URL */
+  keyBookUrl: string;
+  /** Parent ADI URL */
+  adiUrl: string;
+  /** Accept threshold (M of M-of-N) */
+  threshold: number;
+  /** Total entries on the key page (N) */
+  totalEntries: number;
+  /** Whether this hop is a delegate hop */
+  isDelegateHop: boolean;
+}
+
+/**
+ * Structured signing path for Firestore storage
+ */
+export interface FirestoreSigningPath {
+  /** Legacy path string (e.g. "acc://a.acme/book/1 -> acc://b.acme/book/1") */
+  path: string;
+  /** Structured hop metadata */
+  hops: FirestoreSigningPathHop[];
+  /** Last hop URL */
+  finalSigner: string;
+  /** Whether this is a direct (single-hop) path */
+  directPath: boolean;
+  /** Delegation depth */
+  depth: number;
+  /** When discovered */
+  discoveredAt: Timestamp;
+  /** When last validated */
+  validatedAt: Timestamp;
+}
+
+/**
  * Computed state for badge counts
  * Path: /users/{uid}/computedState/pending
  */

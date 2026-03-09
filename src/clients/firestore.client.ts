@@ -12,6 +12,7 @@ import {
   CertenKeyBook,
   PendingActionDocument,
   ComputedPendingState,
+  FirestoreSigningPath,
 } from '../types';
 import { logger, logFirestoreOp } from '../utils/logger';
 import { encodeUrlForDocId } from '../utils/url-normalizer';
@@ -222,6 +223,23 @@ export class FirestoreClient {
     });
 
     logFirestoreOp('write', 'users/signingPaths', 1);
+  }
+
+  /**
+   * Update structured signing paths on the user document.
+   * Writes the full structured path data alongside the legacy flat strings.
+   */
+  async updateUserSigningPathsStructured(
+    uid: string,
+    structuredPaths: FirestoreSigningPath[]
+  ): Promise<void> {
+    const userRef = this.db.collection(this.config.usersCollection).doc(uid);
+    await userRef.update({
+      signingPathsStructured: structuredPaths,
+      signingPathsLastUpdated: admin.firestore.Timestamp.now(),
+    });
+
+    logFirestoreOp('write', 'users/signingPathsStructured', 1);
   }
 
   /**

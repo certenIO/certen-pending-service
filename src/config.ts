@@ -67,7 +67,7 @@ function validateConfig(): AppConfig {
     userConcurrency: parseInt(process.env.USER_CONCURRENCY || '8', 10),
     maxRetries: parseInt(process.env.MAX_RETRIES || '3', 10),
 
-    delegationDepth: parseInt(process.env.DELEGATION_DEPTH || '10', 10),
+    delegationDepth: parseInt(process.env.DELEGATION_DEPTH || '20', 10),
     pendingPageSize: parseInt(process.env.PENDING_PAGE_SIZE || '100', 10),
 
     usersCollection: process.env.USERS_COLLECTION || 'users',

@@ -7,6 +7,24 @@
 import { AccumulatePendingTx, AccumulateSignature } from './accumulate.types';
 
 /**
+ * Structured metadata for a single hop in a signing path
+ */
+export interface SigningPathHop {
+  /** Key page URL */
+  url: string;
+  /** Parent key book URL */
+  keyBookUrl: string;
+  /** Parent ADI URL */
+  adiUrl: string;
+  /** Accept threshold (M of M-of-N) */
+  threshold: number;
+  /** Total entries on the key page (N) */
+  totalEntries: number;
+  /** Whether this hop is a delegate hop (not the origin page) */
+  isDelegateHop: boolean;
+}
+
+/**
  * Discovered signing path (delegation chain)
  */
 export interface SigningPath {
@@ -14,8 +32,14 @@ export interface SigningPath {
   path: string;
   /** Individual key page URLs in order */
   hops: string[];
+  /** Structured metadata for each hop */
+  structuredHops: SigningPathHop[];
   /** Last hop in the chain (where pending transactions are queried) */
   finalSigner: string;
+  /** Whether this is a direct (single-hop) path */
+  directPath: boolean;
+  /** Delegation depth (number of hops) */
+  depth: number;
   /** When this path was discovered */
   discoveredAt: Date;
 }

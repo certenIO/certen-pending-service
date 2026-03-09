@@ -11,7 +11,7 @@ import { SigningPathService } from '../services/signing-path.service';
 import { PendingDiscoveryService } from '../services/pending-discovery.service';
 import { StateManagerService } from '../services/state-manager.service';
 import { AppConfig } from '../config';
-import { CertenUserWithAdis, CertenKeyBook, SigningPath, PollStats, createPollStats } from '../types';
+import { CertenUserWithAdis, CertenKeyBook, SigningPath, FirestoreSigningPath, PollStats, createPollStats } from '../types';
 import { Semaphore } from '../utils/retry';
 import {
   logger,
@@ -168,9 +168,28 @@ export class PendingActionsPoller {
         byAdi: pathsByAdi,
       });
 
-      // Update user doc with all discovered signing paths
+      // Update user doc with all discovered signing paths (legacy + structured)
       const allPathStrings = allPaths.map(p => p.path);
       await this.firestore.updateUserSigningPaths(user.uid, allPathStrings, pathsByAdi);
+
+      // Write structured signing paths with per-hop metadata
+      const structuredPaths: FirestoreSigningPath[] = allPaths.map(p => ({
+        path: p.path,
+        hops: (p.structuredHops || []).map(h => ({
+          url: h.url,
+          keyBookUrl: h.keyBookUrl,
+          adiUrl: h.adiUrl,
+          threshold: h.threshold,
+          totalEntries: h.totalEntries,
+          isDelegateHop: h.isDelegateHop,
+        })),
+        finalSigner: p.finalSigner,
+        directPath: p.directPath,
+        depth: p.depth,
+        discoveredAt: this.firestore.createTimestamp(p.discoveredAt),
+        validatedAt: this.firestore.now(),
+      }));
+      await this.firestore.updateUserSigningPathsStructured(user.uid, structuredPaths);
 
       // Discover pending transactions
       const discovery = await this.discoveryService.discoverPendingForUser(
