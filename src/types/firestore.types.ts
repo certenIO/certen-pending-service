@@ -120,6 +120,32 @@ export interface SignatureRecord {
 }
 
 /**
+ * Per-authority signing status stored in Firestore
+ */
+export interface AuthoritySigningStatus {
+  /** Authority key book URL */
+  authorityUrl: string;
+  /** Whether this authority has approved (met threshold) */
+  approved: boolean;
+  /** Key page URLs under this authority that participated */
+  signerPages: AuthorityPageStatus[];
+}
+
+/**
+ * Per-page signing status within an authority
+ */
+export interface AuthorityPageStatus {
+  /** Key page URL */
+  pageUrl: string;
+  /** Accept threshold for this page */
+  acceptThreshold: number;
+  /** Signatures collected on this page */
+  signatures: SignatureRecord[];
+  /** Whether threshold is met */
+  thresholdMet: boolean;
+}
+
+/**
  * Pending action document stored in Firestore
  * Path: /users/{uid}/pendingActions/{normalizedTxHash}
  */
@@ -138,6 +164,11 @@ export interface PendingActionDocument {
   // Signature tracking
   collectedSignatures: number;
   signatures: SignatureRecord[];
+
+  // Per-authority breakdown
+  authorities?: AuthoritySigningStatus[];
+  totalAuthorities?: number;
+  approvedAuthorities?: number;
 
   // User's signing context
   eligibleSigningPaths: string[];

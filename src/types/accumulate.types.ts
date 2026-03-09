@@ -49,6 +49,28 @@ export interface AccumulateKeyEntry {
 }
 
 /**
+ * Per-authority signature book status from on-chain response
+ */
+export interface AccumulateSignatureBook {
+  /** Authority key book URL (e.g. acc://adi.acme/book) */
+  authority: string;
+  /** Pages with their signatures */
+  pages: AccumulateSignatureBookPage[];
+}
+
+/**
+ * A key page within a signature book
+ */
+export interface AccumulateSignatureBookPage {
+  /** Signer key page URL */
+  signer: string;
+  /** Accept threshold for this page */
+  acceptThreshold: number;
+  /** Signatures collected on this page */
+  signatures: AccumulateSignature[];
+}
+
+/**
  * Pending transaction from Accumulate
  */
 export interface AccumulatePendingTx {
@@ -60,6 +82,10 @@ export interface AccumulatePendingTx {
   signatures: AccumulateSignature[];
   expiresAt?: Date;
   data?: AccumulateTransactionBody;
+  /** Per-authority signature book status */
+  signatureBooks?: AccumulateSignatureBook[];
+  /** Additional authorities from tx header */
+  headerAuthorities?: string[];
 }
 
 /**

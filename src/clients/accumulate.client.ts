@@ -9,6 +9,8 @@ import { AppConfig } from '../config';
 import {
   AccumulatePendingTx,
   AccumulateSignature,
+  AccumulateSignatureBook,
+  AccumulateSignatureBookPage,
   JsonRpcResponse,
   AccumulateKeyPage,
   AccumulateKeyEntry,
@@ -453,6 +455,25 @@ export class AccumulateClient {
     const txId = String(response.id || response.txid || txIdHint || '');
     const hash = normalizeHash(txId || String(response.hash || ''));
 
+    // Extract per-authority signature books
+    const signatureBooks = this.extractSignatureBooks(response);
+
+    // Extract additional authorities from tx header
+    const headerAuthorities: string[] = [];
+    const headerAuth = header.authorities;
+    if (Array.isArray(headerAuth)) {
+      for (const auth of headerAuth) {
+        if (typeof auth === 'string') {
+          headerAuthorities.push(normalizeUrl(auth));
+        } else if (typeof auth === 'object' && auth !== null) {
+          const authUrl = (auth as Record<string, unknown>).url;
+          if (typeof authUrl === 'string') {
+            headerAuthorities.push(normalizeUrl(authUrl));
+          }
+        }
+      }
+    }
+
     return {
       txId,
       hash,
@@ -462,6 +483,8 @@ export class AccumulateClient {
       signatures,
       expiresAt: header.expire ? new Date(Number(header.expire) * 1000) : undefined,
       data: body as unknown as AccumulatePendingTx['data'],
+      signatureBooks: signatureBooks.length > 0 ? signatureBooks : undefined,
+      headerAuthorities: headerAuthorities.length > 0 ? headerAuthorities : undefined,
     };
   }
 
@@ -590,6 +613,65 @@ export class AccumulateClient {
       seen.add(key);
       return true;
     });
+  }
+
+  /**
+   * Extract per-authority signature book status from v3 response.
+   * Parses signatureBooks[] and status.signers[] to build authority breakdown.
+   */
+  private extractSignatureBooks(response: Record<string, unknown>): AccumulateSignatureBook[] {
+    const books: AccumulateSignatureBook[] = [];
+    const sigBooks = response.signatureBooks;
+
+    if (Array.isArray(sigBooks)) {
+      for (const book of sigBooks) {
+        const bookMap = this.asMap(book);
+        const authorityUrl = normalizeUrl(String(bookMap.authority || ''));
+        if (!authorityUrl) continue;
+
+        const pages: AccumulateSignatureBookPage[] = [];
+        const bookPages = bookMap.pages;
+        if (Array.isArray(bookPages)) {
+          for (const page of bookPages) {
+            const pageMap = this.asMap(page);
+            const signerMap = this.asMap(pageMap.signer);
+            const signerUrl = normalizeUrl(String(signerMap.url || ''));
+            const acceptThreshold = Number(signerMap.acceptThreshold || 1);
+
+            const pageSigs: AccumulateSignature[] = [];
+            const rawSigs = pageMap.signatures;
+            const sigsArray = Array.isArray(rawSigs) ? rawSigs : [];
+
+            for (const rawSig of sigsArray) {
+              const sigMap = this.asMap(rawSig);
+              // Could be a direct signature or wrapped in message.signature
+              const msg = this.asMap(sigMap.message);
+              const sig = Object.keys(msg).length > 0 ? this.asMap(msg.signature) : sigMap;
+              const resolvedSigner = this.deepFindSigner(sig) || signerUrl;
+              if (!resolvedSigner) continue;
+
+              pageSigs.push({
+                signer: normalizeUrl(resolvedSigner),
+                publicKeyHash: this.resolvePublicKeyHash(sig),
+                signature: String(sig.signature || sigMap.signature || ''),
+                timestamp: this.parseMicrosTimestamp(sig.timestamp || sigMap.timestamp),
+                vote: this.parseVote(sig.vote || sigMap.vote),
+              });
+            }
+
+            pages.push({
+              signer: signerUrl,
+              acceptThreshold,
+              signatures: pageSigs,
+            });
+          }
+        }
+
+        books.push({ authority: authorityUrl, pages });
+      }
+    }
+
+    return books;
   }
 
   /**

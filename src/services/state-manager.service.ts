@@ -15,6 +15,8 @@ import {
   UpdateResult,
   AccumulateSignature,
   SignatureRecord,
+  AuthoritySigningStatus,
+  AuthorityPageStatus,
 } from '../types';
 import { normalizeHash } from '../utils/hash-normalizer';
 import { logger } from '../utils/logger';
@@ -163,6 +165,9 @@ export class StateManagerService {
       status = 'pending';
     }
 
+    // Build per-authority breakdown from signatureBooks
+    const authorities = this.buildAuthorityStatus(tx, now);
+
     const doc: PendingActionDocument = {
       id: normalizeHash(tx.hash),
       category: eligible.category,
@@ -176,6 +181,12 @@ export class StateManagerService {
 
       collectedSignatures: signatures.length,
       signatures: signatures.map(s => this.convertSignature(s, now)),
+
+      authorities: authorities.length > 0 ? authorities : undefined,
+      totalAuthorities: authorities.length > 0 ? authorities.length : undefined,
+      approvedAuthorities: authorities.length > 0
+        ? authorities.filter(a => a.approved).length
+        : undefined,
 
       eligibleSigningPaths: eligible.eligiblePaths,
       userHasSigned,
@@ -191,6 +202,54 @@ export class StateManagerService {
     }
 
     return doc;
+  }
+
+  /**
+   * Build per-authority signing status from on-chain signatureBooks.
+   * Also incorporates headerAuthorities to include authorities that haven't signed at all.
+   */
+  private buildAuthorityStatus(
+    tx: import('../types').AccumulatePendingTx,
+    now: Timestamp
+  ): AuthoritySigningStatus[] {
+    const authorityMap = new Map<string, AuthoritySigningStatus>();
+
+    // Process signatureBooks from on-chain data
+    if (tx.signatureBooks) {
+      for (const book of tx.signatureBooks) {
+        const pages: AuthorityPageStatus[] = book.pages.map(page => {
+          const sigRecords = page.signatures.map(s => this.convertSignature(s, now));
+          return {
+            pageUrl: page.signer,
+            acceptThreshold: page.acceptThreshold,
+            signatures: sigRecords,
+            thresholdMet: sigRecords.length >= page.acceptThreshold,
+          };
+        });
+
+        const approved = pages.length > 0 && pages.some(p => p.thresholdMet);
+        authorityMap.set(book.authority, {
+          authorityUrl: book.authority,
+          approved,
+          signerPages: pages,
+        });
+      }
+    }
+
+    // Add header authorities that may not appear in signatureBooks yet (not signed)
+    if (tx.headerAuthorities) {
+      for (const authUrl of tx.headerAuthorities) {
+        if (!authorityMap.has(authUrl)) {
+          authorityMap.set(authUrl, {
+            authorityUrl: authUrl,
+            approved: false,
+            signerPages: [],
+          });
+        }
+      }
+    }
+
+    return Array.from(authorityMap.values());
   }
 
   /**
