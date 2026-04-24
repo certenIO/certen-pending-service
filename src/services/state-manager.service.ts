@@ -19,7 +19,7 @@ import {
   AuthorityPageStatus,
 } from '../types';
 import { normalizeHash } from '../utils/hash-normalizer';
-import { encodeUrlForDocId } from '../utils/url-normalizer';
+import { normalizeUrl } from '../utils/url-normalizer';
 import { logger } from '../utils/logger';
 import { Timestamp } from 'firebase-admin/firestore';
 
@@ -147,9 +147,17 @@ export class StateManagerService {
     };
   }
 
-  /** Build a composite Firestore doc id keyed by (txHash, ADI). */
+  /**
+   * Build a composite Firestore doc id keyed by (txHash, ADI).
+   * Must be URL-safe without percent-encoding — React Router's `useParams`
+   * decodes path segments, and if the doc id contains `%XX` sequences the
+   * round-tripped value will no longer match the stored id.
+   */
   private buildDocId(txHash: string, adiUrl: string): string {
-    return `${normalizeHash(txHash)}_${encodeUrlForDocId(adiUrl)}`;
+    const slug = normalizeUrl(adiUrl)
+      .replace(/^acc:\/\//, '')
+      .replace(/[^a-zA-Z0-9._-]/g, '-');
+    return `${normalizeHash(txHash)}_${slug}`;
   }
 
   /**
