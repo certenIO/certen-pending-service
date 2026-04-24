@@ -45,6 +45,11 @@ export class FirestoreClient {
 
     this.db = admin.firestore();
 
+    // Tolerate `undefined` field values on writes by silently dropping them.
+    // Without this, a single optional field set to `undefined` aborts the entire
+    // write with "Cannot use undefined as a Firestore value".
+    this.db.settings({ ignoreUndefinedProperties: true });
+
     // Configure Firestore emulator if specified
     if (config.firestoreEmulatorHost) {
       process.env.FIRESTORE_EMULATOR_HOST = config.firestoreEmulatorHost;

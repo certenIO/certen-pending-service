@@ -45,12 +45,16 @@ export interface SigningPath {
 }
 
 /**
- * Eligible transaction discovered by the algorithm
+ * Eligible transaction discovered by the algorithm.
+ * Uniqueness is per (tx, adiUrl) — the same tx can surface under multiple of a
+ * user's ADIs when foreign-delegate signing is involved, with independent state.
  */
 export interface EligibleTransaction {
   /** The pending transaction */
   tx: AccumulatePendingTx;
-  /** All signing paths that can sign this transaction */
+  /** ADI under whose perspective this entry surfaces (its keybook can sign) */
+  adiUrl: string;
+  /** Signing paths under this ADI that can sign this transaction */
   eligiblePaths: string[];
   /** Category for the transaction */
   category: 'governance' | 'transactions';

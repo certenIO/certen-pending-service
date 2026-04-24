@@ -110,12 +110,17 @@ export class PendingDiscoveryService {
     );
 
     // PHASE 3: Signature chain scan
-    const seenHashes = new Set([...eligibleTxs.keys(), ...awaitingOthersTxs.keys()]);
+    // seenKeys are composite "<txHash>::<adiUrl>" keys — we intentionally allow
+    // the same tx to appear under multiple ADIs when cross-book delegation is involved.
+    const seenKeys = new Set<string>([
+      ...eligibleTxs.keys(),
+      ...awaitingOthersTxs.keys(),
+    ]);
     await this.scanSignatureChains(
       user,
       userKeyHashes,
       pathsByAdi,
-      seenHashes,
+      seenKeys,
       eligibleTxs,
       awaitingOthersTxs,
       allSignatures
@@ -156,6 +161,7 @@ export class PendingDiscoveryService {
 
       const finalSigner = signingPath.finalSigner;
       const priorHop = signingPath.hops[signingPath.hops.length - 2];
+      const pathAdiUrl = extractAdiFromUrl(signingPath.hops[0]);
 
       try {
         // Query pending for final signer
@@ -187,6 +193,7 @@ export class PendingDiscoveryService {
             this.addEligibleTx(
               eligibleTxs,
               tx,
+              pathAdiUrl,
               signingPath.path,
               this.determineCategory(tx)
             );
@@ -240,25 +247,22 @@ export class PendingDiscoveryService {
               allSignatures.set(normalizedHash, tx.signatures);
             }
 
-            // Check if user has signed with any of their keys
-            const userHasSigned = this.hasUserSigned(tx.signatures, userKeyHashes);
+            // Is any of the user's keys already on record signing AS this ADI?
+            // "Has user signed" is per-ADI — signing as kermit-024 does not count
+            // as signing as kermit-022, even for the same underlying transaction.
+            const userHasSigned = this.hasUserSignedFromAdi(
+              tx.signatures,
+              userKeyHashes,
+              adiUrl
+            );
             const category = this.determineCategory(tx);
+            const targetMap = userHasSigned ? awaitingOthersTxs : eligibleTxs;
 
-            if (!userHasSigned) {
-              // User hasn't signed — eligible for signing
-              for (const path of adiSigningPaths) {
-                this.addEligibleTx(eligibleTxs, tx, path, category);
-              }
-              if (adiSigningPaths.length === 0) {
-                this.addEligibleTx(eligibleTxs, tx, adiUrl, category);
-              }
+            if (adiSigningPaths.length === 0) {
+              this.addEligibleTx(targetMap, tx, adiUrl, adiUrl, category);
             } else {
-              // User already signed — awaiting other authorities
               for (const path of adiSigningPaths) {
-                this.addEligibleTx(awaitingOthersTxs, tx, path, category);
-              }
-              if (adiSigningPaths.length === 0) {
-                this.addEligibleTx(awaitingOthersTxs, tx, adiUrl, category);
+                this.addEligibleTx(targetMap, tx, adiUrl, path, category);
               }
             }
           }
@@ -280,7 +284,7 @@ export class PendingDiscoveryService {
     user: CertenUserWithAdis,
     userKeyHashes: Set<string>,
     pathsByAdi: Map<string, string[]>,
-    seenHashes: Set<string>,
+    seenKeys: Set<string>,
     eligibleTxs: Map<string, EligibleTransaction>,
     awaitingOthersTxs: Map<string, EligibleTransaction>,
     allSignatures: Map<string, AccumulateSignature[]>
@@ -288,6 +292,7 @@ export class PendingDiscoveryService {
     const maxEntries = 30;
 
     for (const adi of user.adis) {
+      const adiUrl = normalizeUrl(adi.adiUrl);
       // Collect key book URLs
       const keyBookUrls = new Set<string>();
       for (const keyBook of adi.keyBooks || []) {
@@ -340,8 +345,12 @@ export class PendingDiscoveryService {
               if (!prodTxId) continue;
 
               const txHash = normalizeHash(prodTxId);
-              if (!txHash || seenHashes.has(txHash)) continue;
-              seenHashes.add(txHash);
+              if (!txHash) continue;
+
+              // Dedup per (tx, ADI) — allow the same tx under multiple ADIs.
+              const compositeKey = `${txHash}::${adiUrl}`;
+              if (seenKeys.has(compositeKey)) continue;
+              seenKeys.add(compositeKey);
 
               // Query this transaction to check if still pending
               const txRaw = await this.accumulate.queryTransactionRaw(prodTxId);
@@ -356,14 +365,17 @@ export class PendingDiscoveryService {
 
               foundPending++;
 
-              // Check if user has already signed
-              const userHasSigned = this.hasUserSigned(txDetails.signatures, userKeyHashes);
-              const adiUrl = extractAdiFromUrl(bookUrl);
+              // Has the user already signed AS this ADI (not any other)?
+              const userHasSigned = this.hasUserSignedFromAdi(
+                txDetails.signatures,
+                userKeyHashes,
+                adiUrl
+              );
               const adiPaths = pathsByAdi.get(adiUrl) || [bookUrl];
               const targetMap = userHasSigned ? awaitingOthersTxs : eligibleTxs;
 
               for (const path of adiPaths) {
-                this.addEligibleTx(targetMap, txDetails, path, this.determineCategory(txDetails));
+                this.addEligibleTx(targetMap, txDetails, adiUrl, path, this.determineCategory(txDetails));
               }
 
               if (!allSignatures.has(txHash)) {
@@ -437,13 +449,22 @@ export class PendingDiscoveryService {
   }
 
   /**
-   * Check if user has signed a transaction
+   * Check if any of the user's keys has signed *as* the given ADI — i.e. the
+   * signature's signer URL falls under that ADI. Necessary for cross-ADI
+   * delegation: signing as kermit-024 must not count as having signed as
+   * kermit-022 even when both ADIs belong to the same user.
    */
-  private hasUserSigned(
+  private hasUserSignedFromAdi(
     signatures: AccumulateSignature[],
-    userKeyHashes: Set<string>
+    userKeyHashes: Set<string>,
+    adiUrl: string
   ): boolean {
+    const adi = normalizeUrl(adiUrl);
     for (const sig of signatures) {
+      if (!sig.signer) continue;
+      const signer = normalizeUrl(sig.signer);
+      // Strict ADI boundary — exact match or signer is a sub-path of the ADI.
+      if (signer !== adi && !signer.startsWith(adi + '/')) continue;
       if (userKeyHashes.has(normalizePublicKeyHash(sig.publicKeyHash))) {
         return true;
       }
@@ -522,24 +543,28 @@ export class PendingDiscoveryService {
   }
 
   /**
-   * Add an eligible transaction to the map (handles deduplication)
+   * Add an eligible transaction to the map.
+   * Map is keyed by `<txHash>::<adiUrl>` so the same tx can have independent
+   * entries under each ADI that can sign for it.
    */
   private addEligibleTx(
     map: Map<string, EligibleTransaction>,
     tx: AccumulatePendingTx,
+    adiUrl: string,
     signingPath: string,
     category: 'governance' | 'transactions'
   ): void {
-    const hash = normalizeHash(tx.hash);
+    const key = `${normalizeHash(tx.hash)}::${normalizeUrl(adiUrl)}`;
 
-    if (!map.has(hash)) {
-      map.set(hash, {
+    if (!map.has(key)) {
+      map.set(key, {
         tx,
+        adiUrl: normalizeUrl(adiUrl),
         eligiblePaths: [signingPath],
         category,
       });
     } else {
-      const existing = map.get(hash)!;
+      const existing = map.get(key)!;
       if (!existing.eligiblePaths.includes(signingPath)) {
         existing.eligiblePaths.push(signingPath);
       }

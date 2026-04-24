@@ -19,6 +19,7 @@ import {
   AuthorityPageStatus,
 } from '../types';
 import { normalizeHash } from '../utils/hash-normalizer';
+import { encodeUrlForDocId } from '../utils/url-normalizer';
 import { logger } from '../utils/logger';
 import { Timestamp } from 'firebase-admin/firestore';
 
@@ -45,14 +46,15 @@ export class StateManagerService {
 
     // Get current pending actions to detect changes
     const currentPending = await this.firestore.getPendingActions(uid);
-    const currentHashes = new Set(currentPending.map(p => p.id));
+    const currentDocIds = new Set(currentPending.map(p => p.id));
 
-    // Combine eligible + awaiting_others hashes
+    // Build composite ids `<txHash>_<encodeUrlForDocId(adiUrl)>` so the same tx
+    // surfaced under multiple ADIs (cross-book delegation) gets independent docs.
     const allEligible = discovery.eligibleTransactions;
     const allAwaiting = discovery.awaitingOthersTransactions;
-    const newHashes = new Set([
-      ...allEligible.map(t => normalizeHash(t.tx.hash)),
-      ...allAwaiting.map(t => normalizeHash(t.tx.hash)),
+    const newDocIds = new Set([
+      ...allEligible.map(t => this.buildDocId(t.tx.hash, t.adiUrl)),
+      ...allAwaiting.map(t => this.buildDocId(t.tx.hash, t.adiUrl)),
     ]);
 
     // Determine what to remove and what to add/update
@@ -61,7 +63,7 @@ export class StateManagerService {
 
     // Remove pending actions that are no longer pending (either type)
     for (const doc of currentPending) {
-      if (!newHashes.has(doc.id)) {
+      if (!newDocIds.has(doc.id)) {
         toRemove.push(doc.id);
       }
     }
@@ -105,7 +107,7 @@ export class StateManagerService {
         t.category === 'transactions'
       ).length,
       awaitingOthersCount: discovery.awaitingOthersCount,
-      txHashes: Array.from(newHashes),
+      txHashes: Array.from(newDocIds),
       computedAt: now,
       cycleToken,
     };
@@ -120,7 +122,7 @@ export class StateManagerService {
 
       return {
         success: true,
-        added: toAdd.length - currentHashes.size,
+        added: toAdd.length - currentDocIds.size,
         removed: toRemove.length,
         cycleToken,
       };
@@ -139,10 +141,15 @@ export class StateManagerService {
 
     return {
       success: true,
-      added: toAdd.length - currentHashes.size,
+      added: toAdd.length - currentDocIds.size,
       removed: toRemove.length,
       cycleToken,
     };
+  }
+
+  /** Build a composite Firestore doc id keyed by (txHash, ADI). */
+  private buildDocId(txHash: string, adiUrl: string): string {
+    return `${normalizeHash(txHash)}_${encodeUrlForDocId(adiUrl)}`;
   }
 
   /**
@@ -169,7 +176,7 @@ export class StateManagerService {
     const authorities = this.buildAuthorityStatus(tx, now);
 
     const doc: PendingActionDocument = {
-      id: normalizeHash(tx.hash),
+      id: this.buildDocId(tx.hash, eligible.adiUrl),
       category: eligible.category,
       type: 'transaction',
       status,
