@@ -131,10 +131,15 @@ export class StateManagerService {
     // Commit atomically
     await this.firestore.updatePendingActions(uid, toAdd, toRemove, computedState);
 
-    logger.debug('Updated pending state', {
+    // INFO-level so we can always see per-cycle reconciliation in production logs
+    // (previous debug level hid deletes that happened when discovery returned 0).
+    logger.info('Updated pending state', {
       uid: uid.substring(0, 8),
       added: toAdd.length,
       removed: toRemove.length,
+      removedIds: toRemove,
+      currentDocIds: Array.from(currentDocIds),
+      newDocIds: Array.from(newDocIds),
       eligible: discovery.totalCount,
       awaitingOthers: discovery.awaitingOthersCount,
     });
