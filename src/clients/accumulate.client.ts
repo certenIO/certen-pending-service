@@ -179,7 +179,17 @@ export class AccumulateClient {
         scope: normalizeUrl(keyPageUrl),
       });
 
-      if (!response || response.type !== 'keyPage') {
+      // TEMP DEBUG: dump raw response shape so we can see exactly where keys live.
+      logger.info('🔬 [DEBUG] queryKeyPage raw response', {
+        keyPageUrl,
+        topLevelKeys: response ? Object.keys(response) : [],
+        topLevelType: response?.type,
+        dataKeys: response?.data && typeof response.data === 'object' ? Object.keys(response.data as object) : null,
+        accountKeys: response?.account && typeof response.account === 'object' ? Object.keys(response.account as object) : null,
+        rawResponseSample: JSON.stringify(response).slice(0, 800),
+      });
+
+      if (!response || (response.type !== 'keyPage' && (response as { recordType?: string }).recordType !== 'account')) {
         return null;
       }
 
