@@ -183,9 +183,16 @@ export class AccumulateClient {
         return null;
       }
 
-      // Parse key page response
+      // v3 query wraps the actual keypage account data inside `data` (with
+      // `account` as an older-shape fallback). Top-level `keys`/`version`/etc.
+      // do NOT exist — reading them silently yields empty keys + version=1
+      // and hides every delegate entry on the page.
+      const dataField = (response.data as Record<string, unknown> | undefined)
+        ?? (response.account as Record<string, unknown> | undefined)
+        ?? response;
+
       const keys: AccumulateKeyEntry[] = [];
-      const rawKeys = (response.keys as unknown[]) || [];
+      const rawKeys = (dataField.keys as unknown[]) || [];
 
       for (const key of rawKeys) {
         const keyObj = key as Record<string, unknown>;
@@ -206,9 +213,9 @@ export class AccumulateClient {
       return {
         type: 'keyPage',
         url: normalizeUrl(keyPageUrl),
-        version: Number(response.version) || 1,
-        threshold: Number(response.acceptThreshold) || Number(response.threshold) || 1,
-        creditBalance: Number(response.creditBalance) || 0,
+        version: Number(dataField.version) || 1,
+        threshold: Number(dataField.acceptThreshold) || Number(dataField.threshold) || 1,
+        creditBalance: Number(dataField.creditBalance) || 0,
         keys,
       };
     } catch (error) {
