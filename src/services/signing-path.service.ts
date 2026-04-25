@@ -54,27 +54,69 @@ export class SigningPathService {
     const paths: SigningPath[] = [];
     const processedPages = new Set<string>();
 
-    // Collect all key book URLs from Firestore
+    // Build a fast lookup of Firestore-known keypages keyed by URL.
+    // Used as a fallback (network query fails) and as a delegate-list supplement
+    // (in case the network momentarily returns a sparse view).
+    const firestorePagesByUrl = new Map<string, { keyPage: CertenKeyPage; bookUrl: string }>();
+    for (const keyBook of userAdi.keyBooks || []) {
+      const bookUrl = normalizeUrl(keyBook.url);
+      for (const keyPage of keyBook.keyPages || []) {
+        firestorePagesByUrl.set(normalizeUrl(keyPage.url), { keyPage, bookUrl });
+      }
+    }
+
+    // Collect all candidate keybook URLs from Firestore + ADI directory.
     const keyBookUrls = new Set<string>();
     for (const keyBook of userAdi.keyBooks || []) {
       keyBookUrls.add(normalizeUrl(keyBook.url));
     }
-
-    // Discover additional key books from ADI directory
     const directory = await this.accumulate.queryDirectory(userAdi.adiUrl, { count: 100 });
     for (const entry of directory) {
       keyBookUrls.add(normalizeUrl(entry));
     }
 
-    // Process Firestore key pages first (already have delegate entries)
-    for (const keyBook of userAdi.keyBooks || []) {
-      const bookUrl = normalizeUrl(keyBook.url);
-      for (const keyPage of keyBook.keyPages || []) {
-        const pageUrl = normalizeUrl(keyPage.url);
+    // Network is the source of truth for both keypage membership and delegate
+    // entries — always query per-page, fall back to Firestore only if the
+    // network query fails. Delegate set is a union of (network ∪ firestore) so
+    // a momentary sparse network response can't lose a delegate we already know
+    // about, while a freshly-added delegate is picked up *this* cycle.
+    const discoveredKeyBooks: CertenKeyBook[] = [];
+    for (const bookUrl of keyBookUrls) {
+      const pageCount = await this.accumulate.queryKeyBookPageCount(bookUrl);
+      if (pageCount === 0) continue; // not a keybook (data account, ADI, etc.)
+
+      const discoveredPages: CertenKeyPage[] = [];
+      for (let i = 1; i <= pageCount; i++) {
+        const pageUrl = normalizeUrl(`${bookUrl}/${i}`);
         if (processedPages.has(pageUrl)) continue;
         processedPages.add(pageUrl);
 
-        const hop = this.buildHopFromCertenKeyPage(keyPage, bookUrl, userAdi.adiUrl);
+        const networkPageData = await this.accumulate.queryKeyPage(pageUrl);
+        const firestorePage = firestorePagesByUrl.get(pageUrl)?.keyPage;
+
+        let hop: SigningPathHop;
+        let delegates: string[] = [];
+
+        if (networkPageData) {
+          // Fresh network data wins for hop metadata (version, threshold, etc).
+          discoveredPages.push(this.toFirestoreKeyPage(networkPageData));
+          hop = this.buildHopFromAccumulateData(networkPageData, bookUrl, userAdi.adiUrl, false);
+
+          const networkDelegates = (networkPageData.keys || [])
+            .filter(k => k.delegate)
+            .map(k => normalizeUrl(k.delegate!));
+          const firestoreDelegates = firestorePage ? this.extractDelegates(firestorePage) : [];
+          delegates = Array.from(new Set([...networkDelegates, ...firestoreDelegates]));
+        } else if (firestorePage) {
+          // Network query failed — fall back to last-known Firestore state.
+          discoveredPages.push(firestorePage);
+          hop = this.buildHopFromCertenKeyPage(firestorePage, bookUrl, userAdi.adiUrl);
+          delegates = this.extractDelegates(firestorePage);
+        } else {
+          // Page exists on the chain (pageCount counted it) but neither side
+          // returned data. Record a placeholder; can't walk delegates.
+          hop = this.buildUnknownHop(pageUrl, bookUrl, userAdi.adiUrl, false);
+        }
 
         paths.push({
           path: pageUrl,
@@ -86,61 +128,12 @@ export class SigningPathService {
           discoveredAt: new Date(),
         });
 
-        const delegates = this.extractDelegates(keyPage);
         for (const delegateUrl of delegates) {
-          // G-3: Fresh visited set per delegation chain
+          // G-3: Fresh visited set per delegation chain.
           const visited = new Set<string>([pageUrl]);
           await this.followDelegationChain(
             pageUrl, delegateUrl, [pageUrl], [hop], visited, paths, 1
           );
-        }
-      }
-    }
-
-    // Query each key book for page count — build discovered key books and find new pages
-    const discoveredKeyBooks: CertenKeyBook[] = [];
-    for (const bookUrl of keyBookUrls) {
-      const pageCount = await this.accumulate.queryKeyBookPageCount(bookUrl);
-      if (pageCount === 0) continue; // not a key book (data account, ADI, etc.)
-
-      const discoveredPages: CertenKeyPage[] = [];
-      for (let i = 1; i <= pageCount; i++) {
-        const pageUrl = normalizeUrl(`${bookUrl}/${i}`);
-
-        // Always query Accumulate for latest key page state
-        const keyPageData = await this.accumulate.queryKeyPage(pageUrl);
-        if (keyPageData) {
-          discoveredPages.push(this.toFirestoreKeyPage(keyPageData));
-        }
-
-        // Only add as signing path if not already processed from Firestore loop
-        if (!processedPages.has(pageUrl)) {
-          processedPages.add(pageUrl);
-
-          const hop = keyPageData
-            ? this.buildHopFromAccumulateData(keyPageData, bookUrl, userAdi.adiUrl, false)
-            : this.buildUnknownHop(pageUrl, bookUrl, userAdi.adiUrl, false);
-
-          paths.push({
-            path: pageUrl,
-            hops: [pageUrl],
-            structuredHops: [hop],
-            finalSigner: pageUrl,
-            directPath: true,
-            depth: 1,
-            discoveredAt: new Date(),
-          });
-
-          if (keyPageData?.keys) {
-            const delegates = keyPageData.keys.filter(k => k.delegate).map(k => normalizeUrl(k.delegate!));
-            for (const delegateUrl of delegates) {
-              // G-3: Fresh visited set per delegation chain
-              const visited = new Set<string>([pageUrl]);
-              await this.followDelegationChain(
-                pageUrl, delegateUrl, [pageUrl], [hop], visited, paths, 1
-              );
-            }
-          }
         }
       }
 
