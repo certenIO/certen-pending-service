@@ -179,16 +179,6 @@ export class AccumulateClient {
         scope: normalizeUrl(keyPageUrl),
       });
 
-      // TEMP DEBUG: dump raw response shape so we can see exactly where keys live.
-      logger.info('🔬 [DEBUG] queryKeyPage raw response', {
-        keyPageUrl,
-        topLevelKeys: response ? Object.keys(response) : [],
-        topLevelType: response?.type,
-        dataKeys: response?.data && typeof response.data === 'object' ? Object.keys(response.data as object) : null,
-        accountKeys: response?.account && typeof response.account === 'object' ? Object.keys(response.account as object) : null,
-        rawResponseSample: JSON.stringify(response).slice(0, 800),
-      });
-
       if (!response || (response.type !== 'keyPage' && (response as { recordType?: string }).recordType !== 'account')) {
         return null;
       }
@@ -355,8 +345,20 @@ export class AccumulateClient {
         scope: normalizeUrl(url),
       });
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      // Only a genuine "not found" means the account doesn't exist. A transient
+      // failure (network/timeout/5xx) must NOT be reported as a definitive
+      // "does not exist" — that could make a caller skip or duplicate work.
+      const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
+      if (
+        msg.includes('not found') ||
+        msg.includes('does not exist') ||
+        msg.includes('not exist') ||
+        msg.includes('unknown account')
+      ) {
+        return false;
+      }
+      throw error;
     }
   }
 

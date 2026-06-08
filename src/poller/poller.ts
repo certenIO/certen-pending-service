@@ -30,6 +30,7 @@ export class PendingActionsPoller {
   private readonly stateManager: StateManagerService;
 
   private isRunning = false;
+  private isTicking = false;
   private pollTimer: NodeJS.Timeout | null = null;
 
   constructor(config: AppConfig) {
@@ -80,6 +81,16 @@ export class PendingActionsPoller {
       return;
     }
 
+    // Re-entrancy guard: if a previous cycle is still running (e.g. it took
+    // longer than pollIntervalSec), skip this tick rather than running two
+    // overlapping cycles that double the Firestore/Accumulate load and can
+    // race on the same users' state.
+    if (this.isTicking) {
+      logger.warn('Skipping poll cycle — previous cycle still running (consider a longer pollIntervalSec)');
+      return;
+    }
+    this.isTicking = true;
+
     const startTime = Date.now();
     const stats = createPollStats();
 
@@ -109,6 +120,8 @@ export class PendingActionsPoller {
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
       });
+    } finally {
+      this.isTicking = false;
     }
   }
 

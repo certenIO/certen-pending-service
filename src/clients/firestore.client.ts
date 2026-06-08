@@ -58,19 +58,42 @@ export class FirestoreClient {
   }
 
   /**
+   * Firestore caps a WriteBatch at 500 operations. Commit a list of batch
+   * operations in chunks under that limit. Note: chunking trades the
+   * all-or-nothing atomicity of a single batch for the ability to exceed 500
+   * ops; since the poller recomputes and rewrites state every cycle, a partial
+   * commit self-heals on the next pass.
+   */
+  private async commitInChunks(
+    ops: Array<(batch: admin.firestore.WriteBatch) => void>
+  ): Promise<void> {
+    const MAX_BATCH_OPS = 450; // margin under Firestore's hard 500 limit
+    for (let i = 0; i < ops.length; i += MAX_BATCH_OPS) {
+      const batch = this.db.batch();
+      for (const op of ops.slice(i, i + MAX_BATCH_OPS)) {
+        op(batch);
+      }
+      await batch.commit();
+    }
+  }
+
+  /**
    * List all users with their ADIs
    */
   async listUsersWithAdis(): Promise<CertenUserWithAdis[]> {
     const usersCollection = this.db.collection(this.config.usersCollection);
-    const usersSnapshot = await usersCollection.get();
+    // Only onboarded users are relevant — filter at the query so we don't read
+    // the entire users collection every poll cycle. keyVaultSetup is filtered
+    // in memory below to avoid requiring a composite index.
+    const usersSnapshot = await usersCollection.where('onboardingComplete', '==', true).get();
 
     const users: CertenUserWithAdis[] = [];
 
     for (const userDoc of usersSnapshot.docs) {
       const userData = userDoc.data();
 
-      // Skip users without onboarding complete or key vault setup
-      if (!userData.onboardingComplete || !userData.keyVaultSetup) {
+      // Skip users without key vault setup
+      if (!userData.keyVaultSetup) {
         continue;
       }
 
@@ -166,26 +189,23 @@ export class FirestoreClient {
     toRemove: string[],
     computedState: ComputedPendingState
   ): Promise<void> {
-    const batch = this.db.batch();
-
     const userRef = this.db.collection(this.config.usersCollection).doc(uid);
     const pendingRef = userRef.collection(this.config.pendingActionsSubcollection);
     const computedRef = userRef.collection(this.config.computedStateSubcollection).doc('pending');
 
-    // Remove old pending actions
+    // Build all operations, then commit in chunks so a large add/remove set
+    // can't blow past Firestore's 500-op batch limit. Removes and adds run
+    // first; the computed-state write is last so it reflects the final set.
+    const ops: Array<(batch: admin.firestore.WriteBatch) => void> = [];
     for (const docId of toRemove) {
-      batch.delete(pendingRef.doc(docId));
+      ops.push(batch => batch.delete(pendingRef.doc(docId)));
     }
-
-    // Add/update pending actions
     for (const action of toAdd) {
-      batch.set(pendingRef.doc(action.id), action, { merge: true });
+      ops.push(batch => batch.set(pendingRef.doc(action.id), action, { merge: true }));
     }
+    ops.push(batch => batch.set(computedRef, computedState, { merge: true }));
 
-    // Update computed state
-    batch.set(computedRef, computedState, { merge: true });
-
-    await batch.commit();
+    await this.commitInChunks(ops);
 
     logFirestoreOp('write', 'pendingActions', toAdd.length + toRemove.length + 1);
   }
@@ -205,9 +225,11 @@ export class FirestoreClient {
       return;
     }
 
-    const batch = this.db.batch();
-    snapshot.docs.forEach(doc => batch.delete(doc.ref));
-    await batch.commit();
+    // Chunk the deletes so clearing more than 500 pending actions doesn't
+    // exceed Firestore's batch limit.
+    await this.commitInChunks(
+      snapshot.docs.map(doc => (batch: admin.firestore.WriteBatch) => batch.delete(doc.ref))
+    );
 
     logFirestoreOp('delete', 'pendingActions', snapshot.size);
   }
