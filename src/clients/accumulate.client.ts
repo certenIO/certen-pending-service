@@ -15,7 +15,7 @@ import {
   AccumulateKeyPage,
   AccumulateKeyEntry,
 } from '../types';
-import { withRetry } from '../utils/retry';
+import { withRetry, isNotFoundError } from '../utils/retry';
 import { logger, logRpcCall } from '../utils/logger';
 import { normalizeUrl } from '../utils/url-normalizer';
 import { normalizeHash, publicKeyToHash } from '../utils/hash-normalizer';
@@ -34,6 +34,38 @@ export class AccumulateClient {
       timeout: 30000,
       headers: { 'Content-Type': 'application/json' },
     });
+  }
+
+  // ---- Per-cycle read cache (P5) -------------------------------------------
+  // A poll cycle re-queries the same idempotent reads many times (the same
+  // directory across phases, the same key page across delegates, the same tx
+  // across signing paths and even across users). The poller calls beginCycle()
+  // at the start of a tick and endCycle() at the end; while active, identical
+  // reads share one in-flight promise instead of refetching. Cleared each cycle
+  // so data never goes stale beyond a single snapshot.
+  private cycleCache: Map<string, Promise<unknown>> | null = null;
+
+  beginCycle(): void {
+    this.cycleCache = new Map();
+  }
+
+  endCycle(): void {
+    this.cycleCache = null;
+  }
+
+  private memoize<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const cache = this.cycleCache;
+    if (!cache) return fn();
+    const existing = cache.get(key);
+    if (existing) return existing as Promise<T>;
+    const p = fn();
+    cache.set(key, p);
+    // Never cache failures: evict on rejection so a transient error can be
+    // retried later in the cycle and doesn't poison every duplicate caller.
+    p.catch(() => {
+      if (this.cycleCache === cache) cache.delete(key);
+    });
+    return p;
   }
 
   /**
@@ -58,8 +90,12 @@ export class AccumulateClient {
             range: { start, count: pageSize },
           },
         });
-      } catch {
-        break;
+      } catch (error) {
+        // A genuine "account not found" just means no pending — stop paging
+        // and return what we have. A transient failure MUST propagate so the
+        // caller marks the cycle degraded and does not delete existing actions.
+        if (isNotFoundError(error)) break;
+        throw error;
       }
 
       // Extract records from v3 response (multiple formats)
@@ -115,18 +151,29 @@ export class AccumulateClient {
       return [];
     }
 
+    // Fetch tx details with bounded concurrency instead of one-at-a-time. Each
+    // queryTransaction is memoized per cycle, so a tx shared across signing
+    // paths/accounts is only fetched once. Failures are swallowed per-tx (a
+    // single missing detail shouldn't drop the whole account's pending set).
+    const CONCURRENCY = 5;
     const pendingTxs: AccumulatePendingTx[] = [];
-    for (const txId of txIds) {
-      try {
-        const txDetails = await this.queryTransaction(txId);
-        if (txDetails) {
-          pendingTxs.push(txDetails);
-        }
-      } catch (error) {
-        logger.warn('Failed to fetch pending transaction details', {
-          txId,
-          error: error instanceof Error ? error.message : String(error),
-        });
+    for (let i = 0; i < txIds.length; i += CONCURRENCY) {
+      const batch = txIds.slice(i, i + CONCURRENCY);
+      const results = await Promise.all(
+        batch.map(async (txId) => {
+          try {
+            return await this.queryTransaction(txId);
+          } catch (error) {
+            logger.warn('Failed to fetch pending transaction details', {
+              txId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            return null;
+          }
+        })
+      );
+      for (const tx of results) {
+        if (tx) pendingTxs.push(tx);
       }
     }
 
@@ -137,6 +184,7 @@ export class AccumulateClient {
    * Query a key book to get its page count
    */
   async queryKeyBookPageCount(keyBookUrl: string): Promise<number> {
+    return this.memoize(`pageCount:${normalizeUrl(keyBookUrl)}`, async () => {
     try {
       const response = await this.call<Record<string, unknown>>('query', {
         scope: normalizeUrl(keyBookUrl),
@@ -162,18 +210,23 @@ export class AccumulateClient {
 
       return 0;
     } catch (error) {
+      // not-found => genuinely not a key book (0 pages); transient => propagate
+      // so the discovery cycle is marked degraded rather than silently shrinking.
+      if (isNotFoundError(error)) return 0;
       logger.warn('Failed to query key book page count', {
         keyBookUrl,
         error: error instanceof Error ? error.message : String(error),
       });
-      return 0;
+      throw error;
     }
+    });
   }
 
   /**
    * Query a key page to get its entries
    */
   async queryKeyPage(keyPageUrl: string): Promise<AccumulateKeyPage | null> {
+    return this.memoize(`keyPage:${normalizeUrl(keyPageUrl)}`, async () => {
     try {
       const response = await this.call<Record<string, unknown>>('query', {
         scope: normalizeUrl(keyPageUrl),
@@ -225,6 +278,7 @@ export class AccumulateClient {
       });
       return null;
     }
+    });
   }
 
   /**
@@ -252,11 +306,12 @@ export class AccumulateClient {
 
       return { records, total };
     } catch (error) {
+      if (isNotFoundError(error)) return { records: [], total: 0 };
       logger.debug('Failed to query signature chain', {
         url,
         error: error instanceof Error ? error.message : String(error),
       });
-      return { records: [], total: 0 };
+      throw error;
     }
   }
 
@@ -269,6 +324,7 @@ export class AccumulateClient {
   ): Promise<string[]> {
     const { start = 0, count = 100 } = options;
 
+    return this.memoize(`dir:${normalizeUrl(adiUrl)}:${start}:${count}`, async () => {
     try {
       const response = await this.call<Record<string, unknown>>('query', {
         scope: normalizeUrl(adiUrl),
@@ -296,31 +352,35 @@ export class AccumulateClient {
         })
         .filter((url): url is string => url !== null);
     } catch (error) {
+      if (isNotFoundError(error)) return [];
       logger.warn('Failed to query directory', {
         adiUrl,
         error: error instanceof Error ? error.message : String(error),
       });
-      return [];
+      throw error;
     }
+    });
   }
 
   /**
    * Get transaction details by hash or txid
    */
   async queryTransaction(txHashOrId: string): Promise<AccumulatePendingTx | null> {
-    try {
-      const response = await this.call<Record<string, unknown>>('query', {
-        scope: txHashOrId,
-      });
+    return this.memoize(`tx:${txHashOrId}`, async () => {
+      try {
+        const response = await this.call<Record<string, unknown>>('query', {
+          scope: txHashOrId,
+        });
 
-      return this.parseTransactionResponse(response, txHashOrId);
-    } catch (error) {
-      logger.debug('Failed to query transaction', {
-        txHashOrId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return null;
-    }
+        return this.parseTransactionResponse(response, txHashOrId);
+      } catch (error) {
+        logger.debug('Failed to query transaction', {
+          txHashOrId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      }
+    });
   }
 
   /**

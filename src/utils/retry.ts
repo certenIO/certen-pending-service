@@ -27,9 +27,25 @@ const DEFAULT_OPTIONS: RetryOptions = {
 };
 
 /**
+ * Heuristic: does this error mean the queried account genuinely does not
+ * exist (a definitive negative), as opposed to a transient failure? Used by
+ * the Accumulate client to decide whether an empty result is real or whether
+ * the error must propagate so the caller can mark the cycle degraded.
+ */
+export function isNotFoundError(error: unknown): boolean {
+  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return (
+    msg.includes('not found') ||
+    msg.includes('does not exist') ||
+    msg.includes('not exist') ||
+    msg.includes('unknown account')
+  );
+}
+
+/**
  * Check if an error is a network/transient error that should be retried
  */
-function isTransientError(error: unknown): boolean {
+export function isTransientError(error: unknown): boolean {
   if (error instanceof Error) {
     const message = error.message.toLowerCase();
     // Network errors

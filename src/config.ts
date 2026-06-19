@@ -24,6 +24,9 @@ export interface AppConfig {
   userConcurrency: number;
   maxRetries: number;
 
+  // Health server
+  healthPort: number;
+
   // Discovery
   delegationDepth: number;
   pendingPageSize: number;
@@ -37,6 +40,22 @@ export interface AppConfig {
   dryRun: boolean;
   enableDebugDump: boolean;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
+}
+
+/**
+ * Parse an integer env var, rejecting NaN / out-of-range values at startup.
+ * A bad POLL_INTERVAL_SEC or USER_CONCURRENCY would otherwise silently hot-loop
+ * (setInterval(NaN)) or hang forever (Semaphore(0)), which is invisible without
+ * the health endpoint — fail fast instead.
+ */
+function parseIntEnv(name: string, def: number, min: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return def;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < min) {
+    throw new Error(`${name} must be an integer >= ${min}, got: "${raw}"`);
+  }
+  return n;
 }
 
 function validateConfig(): AppConfig {
@@ -63,12 +82,14 @@ function validateConfig(): AppConfig {
     accumulateApiUrl: process.env.ACCUMULATE_API_URL || 'https://mainnet.accumulatenetwork.io/v3',
     accumulateNetwork: accumulateNetwork as 'mainnet' | 'testnet' | 'devnet',
 
-    pollIntervalSec: parseInt(process.env.POLL_INTERVAL_SEC || '600', 10),
-    userConcurrency: parseInt(process.env.USER_CONCURRENCY || '8', 10),
-    maxRetries: parseInt(process.env.MAX_RETRIES || '3', 10),
+    pollIntervalSec: parseIntEnv('POLL_INTERVAL_SEC', 600, 1),
+    userConcurrency: parseIntEnv('USER_CONCURRENCY', 8, 1),
+    maxRetries: parseIntEnv('MAX_RETRIES', 3, 0),
 
-    delegationDepth: parseInt(process.env.DELEGATION_DEPTH || '20', 10),
-    pendingPageSize: parseInt(process.env.PENDING_PAGE_SIZE || '100', 10),
+    healthPort: parseIntEnv('HEALTH_PORT', 8080, 1),
+
+    delegationDepth: parseIntEnv('DELEGATION_DEPTH', 20, 1),
+    pendingPageSize: parseIntEnv('PENDING_PAGE_SIZE', 100, 1),
 
     usersCollection: process.env.USERS_COLLECTION || 'users',
     pendingActionsSubcollection: 'pendingActions',
