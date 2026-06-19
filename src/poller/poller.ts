@@ -66,6 +66,11 @@ export class PendingActionsPoller {
 
     this.isRunning = true;
 
+    // Register shutdown handlers BEFORE the first tick so a SIGTERM during the
+    // (write-heavy, cold-cache) initial cycle is handled gracefully rather than
+    // killing the process mid-commit.
+    this.setupShutdownHandlers();
+
     // Initial poll
     await this.tick();
 
@@ -74,9 +79,6 @@ export class PendingActionsPoller {
       () => this.tick(),
       this.config.pollIntervalSec * 1000
     );
-
-    // Handle shutdown signals
-    this.setupShutdownHandlers();
   }
 
   /**

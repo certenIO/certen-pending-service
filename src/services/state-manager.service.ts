@@ -149,7 +149,7 @@ export class StateManagerService {
     // (previous debug level hid deletes that happened when discovery returned 0).
     logger.info('Updated pending state', {
       uid: uid.substring(0, 8),
-      added: toAdd.length,
+      added: addedCount,
       removed: toRemove.length,
       removedIds: toRemove,
       currentDocIds: Array.from(currentDocIds),
@@ -160,7 +160,7 @@ export class StateManagerService {
 
     return {
       success: true,
-      added: toAdd.length - currentDocIds.size,
+      added: addedCount,
       removed: toRemove.length,
       cycleToken,
     };

@@ -155,23 +155,14 @@ export class AccumulateClient {
     // queryTransaction is memoized per cycle, so a tx shared across signing
     // paths/accounts is only fetched once. Failures are swallowed per-tx (a
     // single missing detail shouldn't drop the whole account's pending set).
+    // Transient errors propagate (Promise.all rejects -> queryPending throws ->
+    // the discovery phase marks the cycle degraded). A genuinely-missing tx
+    // resolves to null (filtered out) and never poisons the set.
     const CONCURRENCY = 5;
     const pendingTxs: AccumulatePendingTx[] = [];
     for (let i = 0; i < txIds.length; i += CONCURRENCY) {
       const batch = txIds.slice(i, i + CONCURRENCY);
-      const results = await Promise.all(
-        batch.map(async (txId) => {
-          try {
-            return await this.queryTransaction(txId);
-          } catch (error) {
-            logger.warn('Failed to fetch pending transaction details', {
-              txId,
-              error: error instanceof Error ? error.message : String(error),
-            });
-            return null;
-          }
-        })
-      );
+      const results = await Promise.all(batch.map((txId) => this.queryTransaction(txId)));
       for (const tx of results) {
         if (tx) pendingTxs.push(tx);
       }
@@ -374,11 +365,14 @@ export class AccumulateClient {
 
         return this.parseTransactionResponse(response, txHashOrId);
       } catch (error) {
+        // not-found => genuinely gone (null); transient => propagate so the
+        // discovery cycle is marked degraded rather than silently dropping a tx.
+        if (isNotFoundError(error)) return null;
         logger.debug('Failed to query transaction', {
           txHashOrId,
           error: error instanceof Error ? error.message : String(error),
         });
-        return null;
+        throw error;
       }
     });
   }
@@ -391,8 +385,9 @@ export class AccumulateClient {
       return await this.call<Record<string, unknown>>('query', {
         scope: txHashOrId,
       });
-    } catch {
-      return null;
+    } catch (error) {
+      if (isNotFoundError(error)) return null;
+      throw error;
     }
   }
 
