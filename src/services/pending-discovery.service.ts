@@ -69,6 +69,9 @@ export class PendingDiscoveryService {
     const eligibleTxs = new Map<string, EligibleTransaction>();
     const awaitingOthersTxs = new Map<string, EligibleTransaction>();
     const allSignatures = new Map<string, AccumulateSignature[]>();
+    // Per-user (not instance) degraded flag — the service instance is shared
+    // across users processed concurrently, so this must live on the stack.
+    const flags = { degraded: false };
 
     // Get all user's public key hashes for signature matching
     const userKeyHashes = this.extractUserKeyHashes(user);
@@ -85,7 +88,8 @@ export class PendingDiscoveryService {
       signingPaths,
       userKeyHashes,
       eligibleTxs,
-      allSignatures
+      allSignatures,
+      flags
     );
 
     // Build signing paths grouped by ADI for Phase 2 and 3
@@ -106,7 +110,8 @@ export class PendingDiscoveryService {
       pathsByAdi,
       eligibleTxs,
       awaitingOthersTxs,
-      allSignatures
+      allSignatures,
+      flags
     );
 
     // PHASE 3: Signature chain scan
@@ -123,7 +128,8 @@ export class PendingDiscoveryService {
       seenKeys,
       eligibleTxs,
       awaitingOthersTxs,
-      allSignatures
+      allSignatures,
+      flags
     );
 
     // PHASE 4: Build final result (deduplication already handled by Map)
@@ -133,12 +139,14 @@ export class PendingDiscoveryService {
       totalCount: eligibleTxs.size,
       awaitingOthersCount: awaitingOthersTxs.size,
       signatures: allSignatures,
+      degraded: flags.degraded,
     };
 
     logger.info('Discovery completed', {
       uid: user.uid.substring(0, 8),
       eligibleCount: result.totalCount,
       awaitingOthersCount: result.awaitingOthersCount,
+      degraded: result.degraded,
     });
 
     return result;
@@ -151,7 +159,8 @@ export class PendingDiscoveryService {
     signingPaths: SigningPath[],
     userKeyHashes: Set<string>,
     eligibleTxs: Map<string, EligibleTransaction>,
-    allSignatures: Map<string, AccumulateSignature[]>
+    allSignatures: Map<string, AccumulateSignature[]>,
+    flags: { degraded: boolean }
   ): Promise<void> {
     for (const signingPath of signingPaths) {
       // Skip single-hop paths (direct signers) - they're handled in Phase 2
@@ -200,7 +209,10 @@ export class PendingDiscoveryService {
           }
         }
       } catch (error) {
-        logger.warn('Failed to process signing path', {
+        // A transient failure here means we may have missed pending txs for
+        // this path — mark degraded so the reconciler won't delete on this cycle.
+        flags.degraded = true;
+        logger.warn('Failed to process signing path (cycle marked degraded)', {
           path: signingPath.path,
           error: error instanceof Error ? error.message : String(error),
         });
@@ -217,14 +229,27 @@ export class PendingDiscoveryService {
     pathsByAdi: Map<string, string[]>,
     eligibleTxs: Map<string, EligibleTransaction>,
     awaitingOthersTxs: Map<string, EligibleTransaction>,
-    allSignatures: Map<string, AccumulateSignature[]>
+    allSignatures: Map<string, AccumulateSignature[]>,
+    flags: { degraded: boolean }
   ): Promise<void> {
     for (const adi of user.adis) {
       const adiUrl = normalizeUrl(adi.adiUrl);
       const adiSigningPaths = pathsByAdi.get(adiUrl) || [];
 
-      // Discover all accounts under ADI
-      const accounts = await this.discoverAdiAccounts(adi);
+      // Discover all accounts under ADI. A transient failure enumerating
+      // accounts means we can't be sure we saw every account, so mark degraded
+      // and skip this ADI rather than risk deleting its pending actions.
+      let accounts: string[];
+      try {
+        accounts = await this.discoverAdiAccounts(adi);
+      } catch (error) {
+        flags.degraded = true;
+        logger.warn('Failed to enumerate ADI accounts (cycle marked degraded)', {
+          adiUrl,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        continue;
+      }
 
       for (const accountUrl of accounts) {
         try {
@@ -267,7 +292,8 @@ export class PendingDiscoveryService {
             }
           }
         } catch (error) {
-          logger.warn('Failed to query pending for account', {
+          flags.degraded = true;
+          logger.warn('Failed to query pending for account (cycle marked degraded)', {
             accountUrl,
             error: error instanceof Error ? error.message : String(error),
           });
@@ -287,7 +313,8 @@ export class PendingDiscoveryService {
     seenKeys: Set<string>,
     eligibleTxs: Map<string, EligibleTransaction>,
     awaitingOthersTxs: Map<string, EligibleTransaction>,
-    allSignatures: Map<string, AccumulateSignature[]>
+    allSignatures: Map<string, AccumulateSignature[]>,
+    flags: { degraded: boolean }
   ): Promise<void> {
     const maxEntries = 30;
 
@@ -298,10 +325,19 @@ export class PendingDiscoveryService {
       for (const keyBook of adi.keyBooks || []) {
         keyBookUrls.add(normalizeUrl(keyBook.url));
       }
-      // Also check directory for key books
-      const directory = await this.accumulate.queryDirectory(adi.adiUrl, { count: 100 });
-      for (const entry of directory) {
-        keyBookUrls.add(normalizeUrl(entry));
+      // Also check directory for key books (transient failure => degraded;
+      // fall back to the Firestore-known books for this cycle).
+      try {
+        const directory = await this.accumulate.queryDirectory(adi.adiUrl, { count: 100 });
+        for (const entry of directory) {
+          keyBookUrls.add(normalizeUrl(entry));
+        }
+      } catch (error) {
+        flags.degraded = true;
+        logger.warn('Failed to query directory in signature-chain scan (cycle marked degraded)', {
+          adiUrl,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
 
       for (const bookUrl of keyBookUrls) {
@@ -393,7 +429,8 @@ export class PendingDiscoveryService {
             });
           }
         } catch (error) {
-          logger.warn('Failed to scan signature chain', {
+          flags.degraded = true;
+          logger.warn('Failed to scan signature chain (cycle marked degraded)', {
             bookUrl,
             error: error instanceof Error ? error.message : String(error),
           });

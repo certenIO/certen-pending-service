@@ -47,9 +47,10 @@ USER appuser
 # Set environment
 ENV NODE_ENV=production
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD node -e "console.log('healthy')" || exit 1
+# Health check — hit the heartbeat endpoint so a wedged-but-alive loop is
+# detected (the old `console.log` only proved Node could spawn a process).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.HEALTH_PORT||8080)+'/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 
 # Start the service
 CMD ["node", "dist/index.js"]

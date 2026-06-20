@@ -194,14 +194,17 @@ export class FirestoreClient {
     const computedRef = userRef.collection(this.config.computedStateSubcollection).doc('pending');
 
     // Build all operations, then commit in chunks so a large add/remove set
-    // can't blow past Firestore's 500-op batch limit. Removes and adds run
-    // first; the computed-state write is last so it reflects the final set.
+    // can't blow past Firestore's 500-op batch limit. ADDS commit before
+    // DELETES (delete-last): chunking isn't atomic, so if a commit is
+    // interrupted mid-way (e.g. SIGTERM during a deploy) we'd rather leave a
+    // few stale extra docs (self-heal next cycle) than a half-emptied inbox.
+    // The computed-state write is last so it reflects the final set.
     const ops: Array<(batch: admin.firestore.WriteBatch) => void> = [];
-    for (const docId of toRemove) {
-      ops.push(batch => batch.delete(pendingRef.doc(docId)));
-    }
     for (const action of toAdd) {
       ops.push(batch => batch.set(pendingRef.doc(action.id), action, { merge: true }));
+    }
+    for (const docId of toRemove) {
+      ops.push(batch => batch.delete(pendingRef.doc(docId)));
     }
     ops.push(batch => batch.set(computedRef, computedState, { merge: true }));
 

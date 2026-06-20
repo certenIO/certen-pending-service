@@ -74,6 +74,13 @@ export interface DiscoveryResult {
   awaitingOthersCount: number;
   /** All signatures by transaction hash */
   signatures: Map<string, AccumulateSignature[]>;
+  /**
+   * True when a transient query failure (network/timeout/5xx after retries)
+   * may have made this discovery incomplete. The reconciler MUST NOT remove
+   * existing pending actions on a degraded cycle, or a blip would wipe a
+   * user's inbox.
+   */
+  degraded: boolean;
 }
 
 /**
@@ -102,6 +109,8 @@ export interface PollStats {
   totalPending: number;
   /** Firestore write operations */
   firestoreWrites: number;
+  /** Users whose cycle was degraded (transient failures; removals skipped) */
+  degradedUsers: number;
   /** Duration of the poll cycle in ms */
   duration: number;
 }
@@ -117,6 +126,7 @@ export function createPollStats(): PollStats {
     failedUsers: 0,
     totalPending: 0,
     firestoreWrites: 0,
+    degradedUsers: 0,
     duration: 0,
   };
 }
