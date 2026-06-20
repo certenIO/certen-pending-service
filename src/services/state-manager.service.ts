@@ -61,12 +61,26 @@ export class StateManagerService {
     const toRemove: string[] = [];
     const toAdd: PendingActionDocument[] = [];
 
-    // Remove pending actions that are no longer pending (either type)
-    for (const doc of currentPending) {
-      if (!newDocIds.has(doc.id)) {
-        toRemove.push(doc.id);
+    // SAFETY (P1): never delete pending actions on a degraded cycle. A transient
+    // Accumulate failure can make discovery return an incomplete set; deleting
+    // "missing" docs would wipe a user's signing inbox on a network blip. We
+    // still add/update what we did find; stale docs reconcile out next clean cycle.
+    if (discovery.degraded) {
+      logger.warn('Discovery degraded — skipping pending-action removals this cycle', {
+        uid: uid.substring(0, 8),
+        existing: currentPending.length,
+      });
+    } else {
+      // Remove pending actions that are no longer pending (either type)
+      for (const doc of currentPending) {
+        if (!newDocIds.has(doc.id)) {
+          toRemove.push(doc.id);
+        }
       }
     }
+
+    // Number of genuinely new docs (not previously present) — for accurate logs.
+    const addedCount = Array.from(newDocIds).filter(id => !currentDocIds.has(id)).length;
 
     // Add or update eligible transactions (needs user's signature)
     for (const eligible of allEligible) {
@@ -122,7 +136,7 @@ export class StateManagerService {
 
       return {
         success: true,
-        added: toAdd.length - currentDocIds.size,
+        added: addedCount,
         removed: toRemove.length,
         cycleToken,
       };
@@ -135,7 +149,7 @@ export class StateManagerService {
     // (previous debug level hid deletes that happened when discovery returned 0).
     logger.info('Updated pending state', {
       uid: uid.substring(0, 8),
-      added: toAdd.length,
+      added: addedCount,
       removed: toRemove.length,
       removedIds: toRemove,
       currentDocIds: Array.from(currentDocIds),
@@ -146,7 +160,7 @@ export class StateManagerService {
 
     return {
       success: true,
-      added: toAdd.length - currentDocIds.size,
+      added: addedCount,
       removed: toRemove.length,
       cycleToken,
     };

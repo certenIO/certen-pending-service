@@ -33,6 +33,12 @@ export class PendingActionsPoller {
   private isTicking = false;
   private pollTimer: NodeJS.Timeout | null = null;
 
+  // Health/heartbeat state (read by the health server).
+  private lastSuccessfulTickAt: number | null = null;
+  private tickStartedAt: number | null = null;
+  private lastStats: PollStats | null = null;
+  private lastError: string | null = null;
+
   constructor(config: AppConfig) {
     this.config = config;
 
@@ -60,6 +66,11 @@ export class PendingActionsPoller {
 
     this.isRunning = true;
 
+    // Register shutdown handlers BEFORE the first tick so a SIGTERM during the
+    // (write-heavy, cold-cache) initial cycle is handled gracefully rather than
+    // killing the process mid-commit.
+    this.setupShutdownHandlers();
+
     // Initial poll
     await this.tick();
 
@@ -68,9 +79,6 @@ export class PendingActionsPoller {
       () => this.tick(),
       this.config.pollIntervalSec * 1000
     );
-
-    // Handle shutdown signals
-    this.setupShutdownHandlers();
   }
 
   /**
@@ -90,11 +98,16 @@ export class PendingActionsPoller {
       return;
     }
     this.isTicking = true;
+    this.tickStartedAt = Date.now();
 
     const startTime = Date.now();
     const stats = createPollStats();
 
     logPollStart();
+
+    // Enable the Accumulate per-cycle read cache for the duration of this tick
+    // so duplicate idempotent reads (directory/keypage/tx) are coalesced.
+    this.accumulate.beginCycle();
 
     try {
       // Fetch all users with ADIs
@@ -115,14 +128,72 @@ export class PendingActionsPoller {
       stats.duration = Date.now() - startTime;
       logPollComplete(stats);
 
+      // Heartbeat: record a successful cycle for the health endpoint.
+      this.lastSuccessfulTickAt = Date.now();
+      this.lastStats = stats;
+      this.lastError = null;
+
+      // Alarmable signal: surface failed/degraded users as an error-level line
+      // so an operator (or log-based alert) notices, instead of it hiding in
+      // per-user warnings.
+      if (stats.failedUsers > 0 || stats.degradedUsers > 0) {
+        logger.error('Poll cycle completed with failures/degradation', {
+          totalUsers: stats.totalUsers,
+          failedUsers: stats.failedUsers,
+          degradedUsers: stats.degradedUsers,
+        });
+      }
     } catch (error) {
+      this.lastError = error instanceof Error ? error.message : String(error);
       logger.error('Poll cycle failed', {
-        error: error instanceof Error ? error.message : String(error),
+        error: this.lastError,
         stack: error instanceof Error ? error.stack : undefined,
       });
     } finally {
+      this.accumulate.endCycle();
       this.isTicking = false;
+      this.tickStartedAt = null;
     }
+  }
+
+  /**
+   * Health snapshot for the heartbeat server. Reports unhealthy if no cycle has
+   * succeeded within 3 poll intervals (stale) or a single tick has been running
+   * that long (wedged) — either way the orchestrator should restart us.
+   */
+  getHealthSnapshot(): {
+    healthy: boolean;
+    isRunning: boolean;
+    isTicking: boolean;
+    lastSuccessfulTickAt: number | null;
+    secondsSinceLastSuccess: number | null;
+    tickRunningMs: number;
+    stale: boolean;
+    stuck: boolean;
+    lastError: string | null;
+    lastStats: PollStats | null;
+  } {
+    const now = Date.now();
+    const staleAfterMs = this.config.pollIntervalSec * 1000 * 3;
+    const secondsSinceLastSuccess =
+      this.lastSuccessfulTickAt === null ? null : Math.floor((now - this.lastSuccessfulTickAt) / 1000);
+    // Before the first cycle completes we're "starting", not stale.
+    const stale =
+      this.lastSuccessfulTickAt !== null && now - this.lastSuccessfulTickAt > staleAfterMs;
+    const tickRunningMs = this.tickStartedAt ? now - this.tickStartedAt : 0;
+    const stuck = tickRunningMs > staleAfterMs;
+    return {
+      healthy: this.isRunning && !stale && !stuck,
+      isRunning: this.isRunning,
+      isTicking: this.isTicking,
+      lastSuccessfulTickAt: this.lastSuccessfulTickAt,
+      secondsSinceLastSuccess,
+      tickRunningMs,
+      stale,
+      stuck,
+      lastError: this.lastError,
+      lastStats: this.lastStats,
+    };
   }
 
   /**
@@ -245,6 +316,9 @@ export class PendingActionsPoller {
 
       stats.firestoreWrites++;
       stats.processedUsers++;
+      if (discovery.degraded) {
+        stats.degradedUsers++;
+      }
 
       if (discovery.totalCount > 0) {
         logUserContext('info', `Found ${discovery.totalCount} pending actions`, user.uid, {
@@ -272,6 +346,17 @@ export class PendingActionsPoller {
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
+    }
+
+    // Wait (bounded) for any in-flight cycle to finish so SIGTERM during a
+    // routine deploy can't kill a Firestore reconcile mid-commit and leave a
+    // user's pending list half-written.
+    const deadlineMs = Date.now() + 25_000;
+    while (this.isTicking && Date.now() < deadlineMs) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    if (this.isTicking) {
+      logger.warn('Shutdown proceeding while a poll cycle is still in-flight (wait timed out)');
     }
 
     logger.info('Poller shutdown complete');
